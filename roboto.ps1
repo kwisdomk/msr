@@ -32,33 +32,34 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$false)][string]$Url,
-    [Parameter(Mandatory=$false)]
-    [ValidateSet('ultra','high','mobile','audio-flac','audio-opus','audio-mp3')]
+    [Parameter(Mandatory = $false)][string]$Url,
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('ultra', 'high', 'mobile', 'audio-flac', 'audio-opus', 'audio-mp3')]
     [string]$Profile = 'high',
-    [Parameter(Mandatory=$false)][switch]$OfflineMode
+    [Parameter(Mandatory = $false)][switch]$OfflineMode
 )
 
 # ── Force TLS 1.2 (TLS 1.3 enum absent on PS5.1/.NET 4.x — bug #6 fixed) ──
 try {
     [Net.ServicePointManager]::SecurityProtocol =
-        [Net.SecurityProtocolType]::Tls12 -bor
-        [Net.SecurityProtocolType]::Tls11 -bor
-        [Net.SecurityProtocolType]::Tls
+    [Net.SecurityProtocolType]::Tls12 -bor
+    [Net.SecurityProtocolType]::Tls11 -bor
+    [Net.SecurityProtocolType]::Tls
     # Upgrade to Tls13 only if the enum exists (PS7+ / .NET5+)
     $tls13 = [Net.SecurityProtocolType]::Tls13
     [Net.ServicePointManager]::SecurityProtocol =
-        [Net.ServicePointManager]::SecurityProtocol -bor $tls13
-} catch { <# Tls13 not available on this runtime — harmless #> }
+    [Net.ServicePointManager]::SecurityProtocol -bor $tls13
+}
+catch { <# Tls13 not available on this runtime — harmless #> }
 
 # ── Script-level state ──────────────────────────────────────────────────────
-$script:Version     = "2.0.0"
-$script:ScriptRoot  = $PSScriptRoot
-$script:ConfigPath  = Join-Path $ScriptRoot "config.json"
-$script:LogPath     = Join-Path $ScriptRoot "logs"
-$script:LogFile     = $null
-$script:Config      = $null
-$script:Hardware    = $null   # cached once; Show-Banner reuses this
+$script:Version = "2.0.0"
+$script:ScriptRoot = $PSScriptRoot
+$script:ConfigPath = Join-Path $ScriptRoot "config.json"
+$script:LogPath = Join-Path $ScriptRoot "logs"
+$script:LogFile = $null
+$script:Config = $null
+$script:Hardware = $null   # cached once; Show-Banner reuses this
 $script:DownloadDir = $null   # set once per session via Select-DownloadLocation
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -81,11 +82,11 @@ function Show-Spinner {
     Single-threaded — uses carriage-return overwrite. Safe, no jobs.
     #>
     param([string]$Message = 'Working...', [int]$Seconds = 2)
-    $frames = [char[]]@([char]0x280B,[char]0x2819,[char]0x2839,[char]0x2838,
-                        [char]0x283C,[char]0x2834,[char]0x2826,[char]0x2827,
-                        [char]0x2807,[char]0x280F)
+    $frames = [char[]]@([char]0x280B, [char]0x2819, [char]0x2839, [char]0x2838,
+        [char]0x283C, [char]0x2834, [char]0x2826, [char]0x2827,
+        [char]0x2807, [char]0x280F)
     $end = (Get-Date).AddSeconds($Seconds)
-    $i   = 0
+    $i = 0
     while ((Get-Date) -lt $end) {
         Write-Host -NoNewline "`r  $($frames[$i % $frames.Length]) $Message"
         Start-Sleep -Milliseconds 80
@@ -102,10 +103,10 @@ function Show-Spinner {
 
 function Write-Log {
     param(
-        [Parameter(Mandatory)][ValidateSet('DEBUG','INFO','WARN','ERROR')][string]$Level,
+        [Parameter(Mandatory)][ValidateSet('DEBUG', 'INFO', 'WARN', 'ERROR')][string]$Level,
         [Parameter(Mandatory)][string]$Message
     )
-    $ts    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $entry = "[$ts] [$Level] $Message"
 
     if ($script:LogFile) {
@@ -114,9 +115,9 @@ function Write-Log {
 
     $color = switch ($Level) {
         'DEBUG' { 'DarkGray' }
-        'INFO'  { 'White'    }
-        'WARN'  { 'Yellow'   }
-        'ERROR' { 'Red'      }
+        'INFO' { 'White' }
+        'WARN' { 'Yellow' }
+        'ERROR' { 'Red' }
     }
     Write-Host $entry -ForegroundColor $color
 }
@@ -128,8 +129,8 @@ function Initialize-Logging {
     # Rotate: delete logs older than 30 days
     $cutoff = (Get-Date).AddDays(-30)
     Get-ChildItem $script:LogPath -Filter "session_*.log" -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -lt $cutoff } |
-        Remove-Item -Force -ErrorAction SilentlyContinue
+    Where-Object { $_.LastWriteTime -lt $cutoff } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
     Write-Log "INFO" "=== Mr. Roboto v$($script:Version) ==="
     Write-Log "INFO" "Session started  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
@@ -155,21 +156,21 @@ function Initialize-Config {
             libraryMode        = $false
         }
         profiles = [ordered]@{
-            ultra  = [ordered]@{
+            ultra        = [ordered]@{
                 format      = "bestvideo[height<=2160]+bestaudio/best"
                 container   = "mkv"
                 videoCodec  = "auto"
                 audioCodec  = "aac"
                 description = "4K MKV (best quality)"
             }
-            high   = [ordered]@{
+            high         = [ordered]@{
                 format      = "bestvideo[height<=1080]+bestaudio/best"
                 container   = "mp4"
                 videoCodec  = "auto"
                 audioCodec  = "aac"
                 description = "1080p MP4 (recommended)"
             }
-            mobile = [ordered]@{
+            mobile       = [ordered]@{
                 format      = "bestvideo[height<=720]+bestaudio/best"
                 container   = "mp4"
                 videoCodec  = "h264"
@@ -180,28 +181,28 @@ function Initialize-Config {
             # YouTube sources are lossy (Opus/AAC). These profiles give you
             # the best possible extraction at each fidelity/size trade-off.
             "audio-flac" = [ordered]@{
-                format      = "bestaudio"
-                container   = "flac"
-                audioOnly   = $true
-                audioFormat = "flac"
+                format       = "bestaudio"
+                container    = "flac"
+                audioOnly    = $true
+                audioFormat  = "flac"
                 audioQuality = "0"
-                description = "Lossless Archive — best source → FLAC (archival grade)"
+                description  = "Lossless Archive — best source → FLAC (archival grade)"
             }
             "audio-opus" = [ordered]@{
-                format      = "bestaudio[ext=webm]/bestaudio"
-                container   = "opus"
-                audioOnly   = $true
-                audioFormat = "opus"
+                format       = "bestaudio[ext=webm]/bestaudio"
+                container    = "opus"
+                audioOnly    = $true
+                audioFormat  = "opus"
                 audioQuality = "0"
-                description = "High-Fidelity — Opus native, zero re-encode (bit-perfect source)"
+                description  = "High-Fidelity — Opus native, zero re-encode (bit-perfect source)"
             }
-            "audio-mp3" = [ordered]@{
-                format      = "bestaudio"
-                container   = "mp3"
-                audioOnly   = $true
-                audioFormat = "mp3"
+            "audio-mp3"  = [ordered]@{
+                format       = "bestaudio"
+                container    = "mp3"
+                audioOnly    = $true
+                audioFormat  = "mp3"
                 audioQuality = "320K"
-                description = "Universal — MP3 320kbps (maximum device compatibility)"
+                description  = "Universal — MP3 320kbps (maximum device compatibility)"
             }
         }
         # Use quoted key access to survive ConvertFrom-Json round-trips
@@ -219,14 +220,15 @@ function Initialize-Config {
     try {
         $defaultConfig | ConvertTo-Json -Depth 10 | Set-Content $script:ConfigPath -Encoding UTF8
         Write-Host "[INFO] Created default config.json" -ForegroundColor Green
-    } catch {
+    }
+    catch {
         Write-Host "[ERROR] Could not write config.json: $_" -ForegroundColor Red
         throw
     }
 }
 
 function Initialize-Environment {
-    $dirs = @('bin/x64','bin/x86','downloads','metadata','logs','state','cache')
+    $dirs = @('bin/x64', 'bin/x86', 'downloads', 'metadata', 'logs', 'state', 'cache')
     foreach ($d in $dirs) {
         $p = Join-Path $script:ScriptRoot $d
         if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
@@ -236,7 +238,8 @@ function Initialize-Environment {
 
     try {
         $script:Config = Get-Content $script:ConfigPath -Raw | ConvertFrom-Json
-    } catch {
+    }
+    catch {
         Write-Host "[ERROR] Failed to load config.json: $_" -ForegroundColor Red
         throw
     }
@@ -257,7 +260,7 @@ function Get-HardwareCapabilities {
 
     try {
         $allGpus = Get-CimInstance Win32_VideoController -ErrorAction Stop |
-                   Where-Object { $_.Name -notlike "*Microsoft*" -and $_.Name -notlike "*Remote*" }
+        Where-Object { $_.Name -notlike "*Microsoft*" -and $_.Name -notlike "*Remote*" }
 
         # Prefer discrete GPUs: NVIDIA > AMD > Intel iGPU > first available
         $gpu = $allGpus | Where-Object { $_.Name -match "NVIDIA|GeForce|GTX|RTX|Quadro" } | Select-Object -First 1
@@ -266,17 +269,19 @@ function Get-HardwareCapabilities {
 
         if ($gpu) {
             $gpuName = $gpu.Name
-            $encoder = if    ($gpuName -match "NVIDIA|GeForce|GTX|RTX|Quadro") { "h264_nvenc" }
-                       elseif($gpuName -match "AMD|Radeon|RX ")                 { "h264_amf"   }
-                       elseif($gpuName -match "Intel|HD Graphics|UHD|Iris")    { "h264_qsv"   }
-                       else                                                     { "libx264"    }
+            $encoder = if ($gpuName -match "NVIDIA|GeForce|GTX|RTX|Quadro") { "h264_nvenc" }
+            elseif ($gpuName -match "AMD|Radeon|RX ") { "h264_amf" }
+            elseif ($gpuName -match "Intel|HD Graphics|UHD|Iris") { "h264_qsv" }
+            else { "libx264" }
             Write-Log "INFO" "GPU: $gpuName → Encoder: $encoder"
-        } else {
+        }
+        else {
             $gpuName = "None (Software)"
             $encoder = "libx264"
             Write-Log "WARN" "No dedicated GPU found; falling back to libx264."
         }
-    } catch {
+    }
+    catch {
         $gpuName = "Detection Failed"
         $encoder = "libx264"
         Write-Log "WARN" "GPU query error: $($_.Exception.Message)"
@@ -294,7 +299,7 @@ function Get-HardwareCapabilities {
 function Find-Binary {
     param([Parameter(Mandatory)][string]$Name)
 
-    $arch      = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
     $localPath = Join-Path $script:ScriptRoot "bin/$arch/$Name.exe"
 
     if (Test-Path $localPath) {
@@ -317,24 +322,25 @@ function Get-BinaryVersion {
     try {
         $ver = switch ($Name) {
             'yt-dlp' { & $BinaryPath --version 2>$null }
-            'ffmpeg'  {
+            'ffmpeg' {
                 $raw = & $BinaryPath -version 2>&1 | Select-Object -First 1
                 if ($raw -match 'ffmpeg version (\S+)') { $matches[1] } else { '?' }
             }
             default { '?' }
         }
         return ($ver -join '').Trim()
-    } catch { return '?' }
+    }
+    catch { return '?' }
 }
 
 function Install-Binary {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('yt-dlp','ffmpeg')]
+        [ValidateSet('yt-dlp', 'ffmpeg')]
         [string]$Name
     )
 
-    $arch   = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
     $binDir = Join-Path $script:ScriptRoot "bin/$arch"
 
     # Bug #4 fixed: bracket notation for hyphenated key 'yt-dlp'
@@ -355,7 +361,7 @@ function Install-Binary {
         }
         else {
             # FFmpeg arrives as a zip; BtbN layout: ffmpeg-master-*/bin/{ffmpeg,ffprobe}.exe
-            $zipDest  = Join-Path $script:ScriptRoot "cache/ffmpeg_download.zip"
+            $zipDest = Join-Path $script:ScriptRoot "cache/ffmpeg_download.zip"
             $cacheDir = Join-Path $script:ScriptRoot "cache/ffmpeg_extract"
 
             Invoke-WebRequest -Uri $url -OutFile $zipDest -UseBasicParsing
@@ -366,12 +372,12 @@ function Install-Binary {
             Expand-Archive -Path $zipDest -DestinationPath $cacheDir -Force
 
             $innerBin = Get-ChildItem $cacheDir -Recurse -Filter "ffmpeg.exe" |
-                        Select-Object -First 1
+            Select-Object -First 1
 
             if (-not $innerBin) { throw "ffmpeg.exe not found inside the zip archive." }
 
             $ffBinDir = $innerBin.DirectoryName
-            foreach ($exe in @('ffmpeg.exe','ffprobe.exe')) {
+            foreach ($exe in @('ffmpeg.exe', 'ffprobe.exe')) {
                 $src = Join-Path $ffBinDir $exe
                 if (Test-Path $src) {
                     Copy-Item $src $binDir -Force
@@ -383,7 +389,8 @@ function Install-Binary {
             Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
             Write-Log "INFO" "FFmpeg installed successfully."
         }
-    } catch {
+    }
+    catch {
         Write-Log "ERROR" "Failed to install $Name : $($_.Exception.Message)"
         throw
     }
@@ -397,11 +404,12 @@ function Install-Dependencies {
 
     Write-Log "INFO" "Checking dependencies..."
 
-    foreach ($bin in @('yt-dlp','ffmpeg')) {
+    foreach ($bin in @('yt-dlp', 'ffmpeg')) {
         if (-not (Find-Binary $bin)) {
             Write-Log "WARN" "$bin not found. Downloading..."
             Install-Binary -Name $bin
-        } else {
+        }
+        else {
             Write-Log "INFO" "$bin is present."
         }
     }
@@ -419,10 +427,10 @@ function Show-Banner {
     # Bug #9 fixed: reuse $script:Hardware; do NOT call Get-HardwareCapabilities again
     $hw = $script:Hardware
 
-    $ytdlpPath  = Find-Binary 'yt-dlp'
+    $ytdlpPath = Find-Binary 'yt-dlp'
     $ffmpegPath = Find-Binary 'ffmpeg'
-    $ytVer   = if ($ytdlpPath)  { Get-BinaryVersion $ytdlpPath  'yt-dlp' } else { 'not installed' }
-    $ffVer   = if ($ffmpegPath) { Get-BinaryVersion $ffmpegPath 'ffmpeg' } else { 'not installed' }
+    $ytVer = if ($ytdlpPath) { Get-BinaryVersion $ytdlpPath  'yt-dlp' } else { 'not installed' }
+    $ffVer = if ($ffmpegPath) { Get-BinaryVersion $ffmpegPath 'ffmpeg' } else { 'not installed' }
 
     # Bug #10 fixed: actual version strings shown
     $c = 'Cyan'; $w = 'White'; $y = 'Yellow'
@@ -460,7 +468,8 @@ function Save-DownloadState {
     try {
         $Data | ConvertTo-Json -Depth 5 | Set-Content $statePath -Encoding UTF8
         Write-Log "DEBUG" "State saved → $statePath"
-    } catch {
+    }
+    catch {
         Write-Log "WARN" "Could not save state: $($_.Exception.Message)"
     }
 }
@@ -470,7 +479,8 @@ function Get-DownloadState {
     if (-not (Test-Path $statePath)) { return $null }
     try {
         return Get-Content $statePath -Raw | ConvertFrom-Json
-    } catch {
+    }
+    catch {
         Write-Log "WARN" "Could not read state file."
         return $null
     }
@@ -489,10 +499,10 @@ function Clear-DownloadState {
 
 function Test-MediaUrl {
     param([string]$Url)
-    if ([string]::IsNullOrWhiteSpace($Url))    { return $false }
-    if ($Url -notmatch '^https?://[^\s]+$')    { return $false }
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+    if ($Url -notmatch '^https?://[^\s]+$') { return $false }
     # Reject non-http schemes sometimes smuggled in
-    foreach ($bad in @('file://','javascript:','data:')) {
+    foreach ($bad in @('file://', 'javascript:', 'data:')) {
         if ($Url -like "*$bad*") { return $false }
     }
     return $true
@@ -513,10 +523,10 @@ function Start-MediaAcquisition {
 
     Write-Log "INFO" "Acquisition started — URL: $TargetUrl  Profile: $QualityProfile"
 
-    $ytdlpPath  = Find-Binary 'yt-dlp'
+    $ytdlpPath = Find-Binary 'yt-dlp'
     $ffmpegPath = Find-Binary 'ffmpeg'
 
-    if (-not $ytdlpPath)  { Write-Log "ERROR" "yt-dlp not found. Run without -OfflineMode to auto-install."; return }
+    if (-not $ytdlpPath) { Write-Log "ERROR" "yt-dlp not found. Run without -OfflineMode to auto-install."; return }
     if (-not $ffmpegPath) { Write-Log "ERROR" "ffmpeg not found. Run without -OfflineMode to auto-install."; return }
 
     # Access profile from config (ConvertFrom-Json returns PSCustomObject)
@@ -524,7 +534,7 @@ function Start-MediaAcquisition {
     if (-not $prof) { Write-Log "ERROR" "Unknown profile: $QualityProfile"; return }
 
     $downloadDir = $script:DownloadDir  # set by Select-DownloadLocation
-    $ffmpegDir   = Split-Path $ffmpegPath -Parent
+    $ffmpegDir = Split-Path $ffmpegPath -Parent
 
     # Save state before starting (resume support)
     $sessionId = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -542,7 +552,7 @@ function Start-MediaAcquisition {
     # Build yt-dlp argument list
     $ytArgs = [System.Collections.Generic.List[string]]@(
         $TargetUrl,
-        '--format',          $prof.format,
+        '--format', $prof.format,
         '--ffmpeg-location', $ffmpegDir,
         '--continue',
         '--progress',
@@ -552,13 +562,14 @@ function Start-MediaAcquisition {
     if ($isAudioOnly) {
         # Audio-only path: extract + convert, no video muxing
         $ytArgs.Add('--extract-audio')
-        $ytArgs.Add('--audio-format');  $ytArgs.Add($prof.audioFormat)
+        $ytArgs.Add('--audio-format'); $ytArgs.Add($prof.audioFormat)
         $ytArgs.Add('--audio-quality'); $ytArgs.Add($prof.audioQuality)
         $ytArgs.Add('--output'); $ytArgs.Add("$downloadDir/%(title)s.%(ext)s")
         Write-Log "INFO" "Audio-only mode: $($prof.audioFormat.ToUpper()) @ $($prof.audioQuality)"
-    } else {
+    }
+    else {
         # Video path: merge streams into chosen container
-        $ytArgs.Add('--output');              $ytArgs.Add("$downloadDir/%(title)s.%(ext)s")
+        $ytArgs.Add('--output'); $ytArgs.Add("$downloadDir/%(title)s.%(ext)s")
         $ytArgs.Add('--merge-output-format'); $ytArgs.Add($prof.container)
         # Hardware acceleration (skip for software fallback)
         if ($script:Hardware.Encoder -ne 'libx264') {
@@ -581,7 +592,8 @@ function Start-MediaAcquisition {
         Write-Host ""
         Write-Host "  ✔ Download complete!" -ForegroundColor Green
         Clear-DownloadState
-    } catch {
+    }
+    catch {
         Write-Log "ERROR" "Download failed: $($_.Exception.Message)"
         # State file left intact so the user can resume
         Write-Host ""
@@ -608,10 +620,11 @@ function Select-DownloadLocation {
 
     if ($isAudio) {
         $nativeDir = [Environment]::GetFolderPath('MyMusic')
-        $label     = 'Music'
-    } else {
+        $label = 'Music'
+    }
+    else {
         $nativeDir = [Environment]::GetFolderPath('MyVideos')
-        $label     = 'Videos'
+        $label = 'Videos'
     }
 
     # Fallback to local /downloads if the OS shell folder is unavailable
@@ -631,7 +644,8 @@ function Select-DownloadLocation {
         try {
             New-Item -ItemType Directory -Path $nativeDir -Force | Out-Null
             Write-Log 'INFO' "Created download directory: $nativeDir"
-        } catch {
+        }
+        catch {
             Write-Log 'WARN' "Could not create '$nativeDir' — falling back to local downloads folder."
             $nativeDir = Join-Path $script:ScriptRoot 'downloads'
         }
@@ -658,7 +672,8 @@ function Start-InteractiveMode {
         $ans = Read-Host "  Resume this download? [Y/N]"
         if ($ans -match '^[Yy]') {
             Start-MediaAcquisition -TargetUrl $state.url -QualityProfile $state.profile
-        } else {
+        }
+        else {
             Clear-DownloadState
         }
     }
@@ -685,19 +700,19 @@ function Start-InteractiveMode {
         $choice = (Read-Host "  Choice").Trim().ToUpper()
 
         $selectedProfile = switch ($choice) {
-            '1'     { 'ultra'      }
-            'U'     { 'ultra'      }
-            '2'     { 'high'       }
-            'H'     { 'high'       }
-            '3'     { 'mobile'     }
-            'M'     { 'mobile'     }
-            '4'     { 'audio-flac' }
-            'F'     { 'audio-flac' }
-            '5'     { 'audio-opus' }
-            'O'     { 'audio-opus' }
-            '6'     { 'audio-mp3'  }
-            'P'     { 'audio-mp3'  }
-            'Q'     { Write-Host "  Goodbye.`n" -ForegroundColor Cyan; return }
+            '1' { 'ultra' }
+            'U' { 'ultra' }
+            '2' { 'high' }
+            'H' { 'high' }
+            '3' { 'mobile' }
+            'M' { 'mobile' }
+            '4' { 'audio-flac' }
+            'F' { 'audio-flac' }
+            '5' { 'audio-opus' }
+            'O' { 'audio-opus' }
+            '6' { 'audio-mp3' }
+            'P' { 'audio-mp3' }
+            'Q' { Write-Host "  Goodbye.`n" -ForegroundColor Cyan; return }
             default {
                 Write-Host "  Invalid choice — try again." -ForegroundColor Red
                 $null
@@ -748,12 +763,14 @@ function Main {
             }
             Select-DownloadLocation -QualityProfile $Profile
             Start-MediaAcquisition -TargetUrl $Url -QualityProfile $Profile
-        } else {
+        }
+        else {
             Start-InteractiveMode
         }
 
         Write-Log "INFO" "Session ended."
-    } catch {
+    }
+    catch {
         Write-Log "ERROR" "Fatal: $($_.Exception.Message)"
         Write-Host "`n  FATAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "  Check logs at: $script:LogPath`n"       -ForegroundColor Yellow
