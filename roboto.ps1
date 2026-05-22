@@ -53,6 +53,12 @@ try {
 catch { <# Tls13 not available on this runtime - harmless #> }
 
 #  Script-level state 
+enum DownloadMode {
+    Public
+    EscalatedAuth
+    TransientFailure
+}
+$script:DownloadMode = [DownloadMode]::Public
 $script:Version = "2.0.0"
 $script:ScriptRoot = $PSScriptRoot
 $script:ConfigPath = Join-Path $ScriptRoot "config.json"
@@ -61,7 +67,6 @@ $script:LogFile = $null
 $script:Config = $null
 $script:Hardware = $null   # cached once; Show-Banner reuses this
 $script:DownloadDir = $null   # set once per session via Select-DownloadLocation
-$script:CookieBackend = $null  # auto-detected browser for --cookies-from-browser
 
 # 
 #region  ANIMATIONS
@@ -113,14 +118,6 @@ function Write-Log {
     if ($script:LogFile) {
         try { Add-Content -Path $script:LogFile -Value $entry -ErrorAction Stop } catch {}
     }
-
-    $color = switch ($Level) {
-        'DEBUG' { 'DarkGray' }
-        'INFO' { 'White' }
-        'WARN' { 'Yellow' }
-        'ERROR' { 'Red' }
-    }
-    Write-Host $entry -ForegroundColor $color
 }
 
 function Initialize-Logging {
@@ -247,9 +244,6 @@ function Initialize-Environment {
 
     Initialize-Logging
     Write-Log "INFO" "Environment ready."
-
-    # Auto-detect browser for cookie auth (silent, no prompt)
-    $script:CookieBackend = Get-CookieBackend
 }
 
 #endregion
@@ -418,6 +412,24 @@ function Install-Dependencies {
         }
     }
 
+    # JS runtime check - yt-dlp requires Deno (or Node/PhantomJS) for full format
+    # extraction. Without it some formats are silently missing and a WARNING fires
+    # mid-download. Deno is the only runtime enabled by default in recent yt-dlp.
+    $denoPath = Get-Command 'deno' -ErrorAction SilentlyContinue
+    if ($denoPath) {
+        $denoVer = (& $denoPath.Source --version 2>$null | Select-Object -First 1) -replace 'deno ','' 
+        Write-Log "INFO" "Deno JS runtime: $denoVer"
+    }
+    else {
+        Write-Log "WARN" "Deno JS runtime not found. Some YouTube formats may be missing."
+        Write-Host ''
+        Write-Host '  [WARN] Deno runtime not detected.' -ForegroundColor Yellow
+        Write-Host '  yt-dlp uses Deno for JavaScript extraction. Without it,' -ForegroundColor DarkYellow
+        Write-Host '  some formats are silently skipped and quality may degrade.' -ForegroundColor DarkYellow
+        Write-Host '  Install: winget install DenoLand.Deno  (then restart this terminal)' -ForegroundColor Cyan
+        Write-Host ''
+    }
+
     Write-Log "INFO" "All dependencies ready."
 }
 
@@ -453,9 +465,6 @@ function Show-Banner {
     Write-Host ("  FFmpeg   : {0}" -f $ffVer)            -ForegroundColor $w
     $mode = if ($Url) { 'Direct' } else { 'Interactive' }
     Write-Host ("  Mode     : {0}" -f $mode) -ForegroundColor $w
-    if ($script:CookieBackend) {
-        Write-Host ("  Cookies  : {0}" -f $script:CookieBackend) -ForegroundColor $w
-    }
     Write-Host ""
     Write-Host "  -----------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host -NoNewline '  '
@@ -498,6 +507,32 @@ function Clear-DownloadState {
     Remove-Item $statePath -Force -ErrorAction SilentlyContinue
 }
 
+function Show-DownloadHistory {
+    $historyFile = Join-Path $script:ScriptRoot "state/download_history.json"
+
+    if (-not (Test-Path $historyFile)) {
+        Write-Host "`n  No downloads yet.`n" -ForegroundColor Yellow
+        return
+    }
+
+    try {
+        $history = Get-Content $historyFile -Raw | ConvertFrom-Json
+        if ($history -isnot [array]) { $history = @($history) }
+
+        Write-Host "`n=== Previous Downloads ===`n" -ForegroundColor Cyan
+
+        $history | ForEach-Object {
+            $t = if ([string]::IsNullOrWhiteSpace($_.title)) { "Unknown Title" } else { $_.title }
+            Write-Host "• $t" -ForegroundColor Cyan
+            Write-Host "  $($_.time) | $($_.profile)" -ForegroundColor DarkGray
+            Write-Host "  $($_.url)`n" -ForegroundColor DarkGray
+        }
+    }
+    catch {
+        Write-Host "`n  Failed to read history.`n" -ForegroundColor Red
+    }
+}
+
 #endregion
 
 # 
@@ -513,6 +548,50 @@ function Test-MediaUrl {
         if ($Url -like "*$bad*") { return $false }
     }
     return $true
+}
+
+function Get-FailureType {
+    param(
+        [int]$ExitCode,
+        [string]$Output,
+        [string]$Url
+    )
+
+    if ($ExitCode -eq 0) { return "Success" }
+    if ([string]::IsNullOrWhiteSpace($Output)) { return "Unknown" }
+
+    # Step 1: Check HTTP layer hints (403/401/429)
+    if ($Output -match "HTTP Error 429") { return "Transient" }
+    if ($Output -match "HTTP Error 401|HTTP Error 403") { return "Auth" }
+
+    # Step 2: Check extractor message patterns
+    $authSignatures = @(
+        "Sign in to confirm",
+        "requires authentication",
+        "private video"
+    )
+
+    $transientSignatures = @(
+        "extract error",
+        "NameResolutionFailure",
+        "timeout",
+        "Connection refused"
+    )
+
+    foreach ($sig in $authSignatures) {
+        if ($Output -match "(?i)$sig") { return "Auth" }
+    }
+
+    foreach ($sig in $transientSignatures) {
+        if ($Output -match "(?i)$sig") { return "Transient" }
+    }
+
+    # Step 3: Confirm with context (e.g., if exit code is 1 and URL has auth hints)
+    if ($ExitCode -eq 1 -and $Url -match "(?i)members|premium|age|private") {
+        return "Auth"
+    }
+
+    return "Unknown"
 }
 
 #endregion
@@ -556,48 +635,42 @@ function Start-MediaAcquisition {
     # Detect audio-only mode (profile has audioOnly flag)
     $isAudioOnly = $prof.PSObject.Properties.Name -contains 'audioOnly' -and $prof.audioOnly
 
-    # Build yt-dlp argument list
-    $ytArgs = [System.Collections.Generic.List[string]]@(
+    # Build yt-dlp core argument list
+    $coreArgs = [System.Collections.Generic.List[string]]@(
         $TargetUrl,
         '--format', $prof.format,
         '--ffmpeg-location', $ffmpegDir,
+        '--no-part',
         '--continue',
         '--progress',
         '--newline'
     )
 
-    if ($script:CookieBackend) {
-        $ytArgs.Add('--cookies-from-browser')
-        $ytArgs.Add($script:CookieBackend)
-    }
-
     if ($isAudioOnly) {
         # Audio-only path: extract + convert, no video muxing
-        $ytArgs.Add('--extract-audio')
-        $ytArgs.Add('--audio-format'); $ytArgs.Add($prof.audioFormat)
-        $ytArgs.Add('--audio-quality'); $ytArgs.Add($prof.audioQuality)
-        $ytArgs.Add('--output'); $ytArgs.Add("$downloadDir/%(title)s.%(ext)s")
+        $coreArgs.Add('--extract-audio')
+        $coreArgs.Add('--audio-format'); $coreArgs.Add($prof.audioFormat)
+        $coreArgs.Add('--audio-quality'); $coreArgs.Add($prof.audioQuality)
+        $coreArgs.Add('--output'); $coreArgs.Add("$downloadDir/%(title)s.%(ext)s")
         Write-Log "INFO" "Audio-only mode: $($prof.audioFormat.ToUpper()) @ $($prof.audioQuality)"
     }
     else {
         # Video path: merge streams into chosen container
-        $ytArgs.Add('--output'); $ytArgs.Add("$downloadDir/%(title)s.%(ext)s")
-        $ytArgs.Add('--merge-output-format'); $ytArgs.Add($prof.container)
-        # Hardware acceleration (skip for software fallback)
+        $coreArgs.Add('--output'); $coreArgs.Add("$downloadDir/%(title)s.%(ext)s")
+        $coreArgs.Add('--merge-output-format'); $coreArgs.Add($prof.container)
+        # Stream-copy: mux without re-encoding to preserve original codec quality
         if ($script:Hardware.Encoder -ne 'libx264') {
-            $ytArgs.Add('--postprocessor-args')
-            $ytArgs.Add("ffmpeg:-c:v $($script:Hardware.Encoder)")
-            Write-Log "INFO" "Using HW encoder: $($script:Hardware.Encoder)"
+            $coreArgs.Add('--postprocessor-args')
+            $coreArgs.Add("merger+ffmpeg:-c copy")
+            Write-Log "INFO" "Stream-copy mode (no re-encode). HW encoder available: $($script:Hardware.Encoder)"
         }
     }
 
     # Media enrichment - thumbnails and metadata (all profiles)
-    $ytArgs.AddRange([string[]]@(
-        '--embed-thumbnail',
-        '--embed-metadata',
-        '--add-metadata',
-        '--convert-thumbnails', 'jpg'
-    ))
+    $coreArgs.AddRange([string[]]@(
+            '--embed-thumbnail',
+            '--embed-metadata'
+        ))
 
     # Playlist interceptor - default to single video, prompt only when needed
     $playlistFlag = '--no-playlist'
@@ -640,64 +713,128 @@ function Start-MediaAcquisition {
         }
         Write-Host ""
     }
-    $ytArgs.Add($playlistFlag)
+    $coreArgs.Add($playlistFlag)
 
-    Write-Host ''
-    Write-Host "  - Downloading..." -ForegroundColor Green
-    Write-Host "    Profile  : $QualityProfile ($($prof.description))" -ForegroundColor DarkGray
-    Write-Host "    Output   : $downloadDir" -ForegroundColor DarkGray
-    Write-Host ''
+    # Pre-build decoupled argument pipelines
+    $publicArgs = New-Object System.Collections.Generic.List[string]
+    $publicArgs.AddRange($coreArgs)
+    $publicArgs.Add('--no-cookies')
 
-    try {
-        & $ytdlpPath @ytArgs
-        if ($LASTEXITCODE -ne 0) { throw "yt-dlp exited with code $LASTEXITCODE" }
-        Write-Log "INFO" "Download completed successfully."
-        Write-Host ""
-        Write-Host "   Download complete!" -ForegroundColor Green
-        Clear-DownloadState
-    }
-    catch {
-        Write-Log "ERROR" "Download failed: $($_.Exception.Message)"
-        # State file left intact so the user can resume
-        Write-Host ""
-        Write-Host "   Download failed. State saved for resume. Check logs for details." -ForegroundColor Red
-    }
-}
+    $authArgs = New-Object System.Collections.Generic.List[string]
+    $authArgs.AddRange($coreArgs)
+    $authArgs.Add('--cookies-from-browser')
+    $authArgs.Add('edge')
 
-#endregion
+    # Start unconditionally in Public Mode
+    $script:DownloadMode = [DownloadMode]::Public
+    $maxAttempts = 3
+    $attempt = 1
+    $success = $false
 
-# 
-#region  BROWSER COOKIES
-# 
-
-function Get-CookieBackend {
-    <#
-    Silent priority-ordered browser detection.
-    Returns the yt-dlp browser identifier string for the first installed
-    browser found, or $null if none detected. No user prompt.
-    #>
-    $browsers = @(
-        @{ Name = 'edge';     Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data" }
-        @{ Name = 'chrome';   Path = "$env:LOCALAPPDATA\Google\Chrome\User Data" }
-        @{ Name = 'brave';    Path = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data" }
-        @{ Name = 'firefox';  Path = "$env:APPDATA\Mozilla\Firefox\Profiles" }
-        @{ Name = 'vivaldi';  Path = "$env:LOCALAPPDATA\Vivaldi\User Data" }
-        @{ Name = 'opera';    Path = "$env:APPDATA\Opera Software\Opera Stable" }
-        @{ Name = 'chromium'; Path = "$env:LOCALAPPDATA\Chromium\User Data" }
-    )
-
-    foreach ($b in $browsers) {
-        if (Test-Path $b.Path) {
-            Write-Log "DEBUG" "Auto-detected browser for cookies: $($b.Name)"
-            return $b.Name
+    while ($attempt -le $maxAttempts -and -not $success) {
+        $color = switch ($script:DownloadMode) {
+            'Public' { 'Green' }
+            'EscalatedAuth' { 'Red' }
+            'TransientFailure' { 'Magenta' }
+            default { 'Cyan' }
         }
+
+        Write-Host ''
+        Write-Host "  - Downloading (Attempt $attempt/$maxAttempts)..." -ForegroundColor $color
+        Write-Host "    Mode     : $($script:DownloadMode)" -ForegroundColor $color
+        Write-Host "    Profile  : $QualityProfile ($($prof.description))" -ForegroundColor DarkGray
+        Write-Host "    Output   : $downloadDir" -ForegroundColor DarkGray
+        Write-Host ''
+
+        $activeArgs = if ($script:DownloadMode -eq [DownloadMode]::EscalatedAuth) { $authArgs } else { $publicArgs }
+
+        try {
+            $errCapture = ""
+            $outCapture = ""
+            & $ytdlpPath @activeArgs 2>&1 | ForEach-Object {
+                $line = $_.ToString()
+                $outCapture += $line + "`n"
+                if     ($line -match '^\[download\]') { Write-Host "  $line" }
+                elseif ($line -match '^ERROR:')       { $errCapture += $line + "`n" }
+            }
+            $exitCode = $LASTEXITCODE
+
+            if ($exitCode -eq 0) {
+                $title = $TargetUrl
+                if ($outCapture -match 'Destination:\s*.*[\\/]([^\\/]+)\.\w+$') {
+                    $title = $matches[1]
+                }
+                elseif ($outCapture -match 'Adding metadata to\s*".*[\\/]([^\\/]+)\.\w+"') {
+                    $title = $matches[1]
+                }
+
+                Write-Log "INFO" "Download completed successfully."
+                Write-Host "`n   Download complete!" -ForegroundColor Green
+
+                $historyFile = Join-Path $script:ScriptRoot "state/download_history.json"
+                $record = [PSCustomObject]@{
+                    title   = $title
+                    url     = $TargetUrl
+                    profile = $QualityProfile
+                    path    = $downloadDir
+                    time    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+                    status  = "completed"
+                }
+
+                $history = @()
+                if (Test-Path $historyFile) {
+                    try {
+                        $parsed = Get-Content $historyFile -Raw | ConvertFrom-Json
+                        if ($parsed -isnot [array]) { $history = @($parsed) } else { $history = $parsed }
+                    }
+                    catch {}
+                }
+                $history += $record
+                try {
+                    $history | ConvertTo-Json -Depth 5 | Set-Content $historyFile -Encoding UTF8
+                }
+                catch { Write-Log "WARN" "Failed to write download history." }
+
+                Clear-DownloadState
+                $success = $true
+                break
+            }
+
+            # If we reached here, execution failed
+            Write-Log "WARN" "yt-dlp exited with code $exitCode."
+            $failType = Get-FailureType -ExitCode $exitCode -Output $errCapture -Url $TargetUrl
+            Write-Log "WARN" "Failure classified as: $failType"
+
+            if ($failType -eq "Auth") {
+                Write-Host "  Sign-in required. Escalating to browser cookies..." -ForegroundColor Yellow
+                $script:DownloadMode = [DownloadMode]::EscalatedAuth
+            }
+            elseif ($failType -eq "Transient") {
+                Write-Host "  Network issue. Retrying in 5s..." -ForegroundColor Magenta
+                $script:DownloadMode = [DownloadMode]::TransientFailure
+                Start-Sleep -Seconds 5
+            }
+            else {
+                Write-Host "  Download failed - see logs\ for details." -ForegroundColor Red
+                break
+            }
+        }
+        catch {
+            Write-Log "ERROR" "Execution error: $($_.Exception.Message)"
+            break
+        }
+        $attempt++
     }
 
-    Write-Log "WARN" "No supported browser detected for cookie extraction."
-    return $null
+    if (-not $success) {
+        Write-Log "ERROR" "Download failed after $attempt attempts."
+        Write-Host "`n   Download failed. State saved for resume. Check logs for details." -ForegroundColor Red
+    }
 }
 
 #endregion
+
+
 
 # 
 #region  DOWNLOAD LOCATION
@@ -758,8 +895,13 @@ function Select-DownloadLocation {
 # 
 
 function Start-InteractiveMode {
-    # Check for interrupted session
+    # Check for interrupted session; discard stale state (>2h) to avoid spurious prompts
     $state = Get-DownloadState
+    if ($state -and $state.status -eq 'in_progress') {
+        if (((Get-Date) - [datetime]$state.timestamp).TotalHours -gt 2) {
+            Clear-DownloadState; $state = $null
+        }
+    }
     if ($state -and $state.status -eq "in_progress") {
         Write-Host ""
         Write-Host "   Interrupted download detected:" -ForegroundColor Yellow
@@ -789,6 +931,7 @@ function Start-InteractiveMode {
         Write-Host "  |  [5] Opus    Hi-Fi native      (bit-perfect, smallest)  |" -ForegroundColor Cyan
         Write-Host "  |  [6] MP3     320 kbps          (universal compatibility) |" -ForegroundColor Blue
         Write-Host "  +-----------------------------------------------------------+" -ForegroundColor DarkGray
+        Write-Host "  |  [7] View Download History                              |" -ForegroundColor Cyan
         Write-Host "  |  [Q] Quit                                               |" -ForegroundColor Red
         Write-Host "  +-----------------------------------------------------------+" -ForegroundColor DarkGray
         Write-Host ""
@@ -808,6 +951,7 @@ function Start-InteractiveMode {
             'O' { 'audio-opus' }
             '6' { 'audio-mp3' }
             'P' { 'audio-mp3' }
+            '7' { Show-DownloadHistory; continue }
             'Q' { Write-Host "  Goodbye.`n" -ForegroundColor Cyan; return }
             default {
                 Write-Host "  Invalid choice - try again." -ForegroundColor Red
