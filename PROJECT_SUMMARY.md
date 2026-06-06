@@ -8,23 +8,40 @@
 
 ## Project Scope
 
-### In Scope (MVP - Phases 1-2)
+### In Scope (MVP - Phases 1-2 + Linux)
 
 ✅ **Phase 1: Bootstrapper Core**
 - Directory scaffolding
 - Binary locator system
-- GPU detection (NVIDIA/Intel/AMD)
-- Auto-download for yt-dlp and FFmpeg
+- GPU detection (NVIDIA/Intel/AMD) — Windows (WMI) and Linux (`nvidia-smi`/`lspci`)
+- Auto-download for yt-dlp and FFmpeg — Windows (.exe/.zip) and Linux (binary/tar.xz)
 - Logging framework
 - Startup banner
 
 ✅ **Phase 2: Interactive Menu System**
-- Quality profile selection (Ultra/High/Mobile)
+- Quality profile selection (Ultra/High/Mobile + Audio)
 - URL intake and validation
 - Download orchestration
 - Progress tracking
 - Error handling and recovery
 - Resume capability
+
+✅ **Linux Support**
+- `roboto.sh` launcher (requires `pwsh` / PowerShell 7+)
+- Cross-platform binary management (`bin/x64/` — no `.exe` on Linux)
+- `linux-x64` and `linux-arm64` download URLs in config
+- Linux GPU detection via `nvidia-smi` and `lspci`
+- AMD encoder mapped to `h264_vaapi` on Linux (VA-API standard)
+- XDG-aware download directories (`~/Music`, `~/Videos`)
+- Browser cookie auth detects Firefox/Chrome/Chromium on Linux
+
+✅ **Bug Fixes & Runtime Improvements**
+- **Resume missing output path** — `downloadDir` is now saved to session state and restored on resume; previously the output path was empty, causing yt-dlp to write to `/` and fail with permission denied
+- **Stale system yt-dlp shadowing** — `Find-Binary` now correctly prefers `bin/x64/yt-dlp` over system PATH, ensuring the auto-downloaded latest binary is always used instead of a potentially years-old system package
+- **Auth escalation without browser** — cookie auth now safely skips escalation with a clear message when no supported browser is installed on Linux, rather than passing an invalid `--cookies-from-browser edge` argument
+- **Windows backslash in Linux error message** — `logs\` path separator corrected to `logs/`
+- **TLS setup on Linux** — `[Net.ServicePointManager]` call wrapped in `$IsWindows` guard; on Linux/.NET 6+ TLS is handled natively and the call would throw unnecessary exceptions
+- **PS5.1 `$IsWindows` polyfill** — `$IsWindows`/`$IsLinux`/`$IsMacOS` are now defined for PS5.1 (Windows-only runtime) where these automatic variables do not exist
 
 ### Out of Scope (Future Phases)
 
@@ -159,12 +176,23 @@
 
 ## Hardware Acceleration
 
-| GPU Vendor | Encoder | Performance | Fallback |
-|------------|---------|-------------|----------|
-| **NVIDIA** | NVENC | ⚡⚡⚡ Fastest | ✅ |
-| **Intel** | QSV | ⚡⚡ Fast | ✅ |
-| **AMD** | AMF | ⚡⚡ Fast | ✅ |
-| **None** | libx264 | ⚡ Software | N/A |
+**Windows**
+
+| GPU Vendor | Encoder | Performance |
+|------------|---------|-------------|
+| **NVIDIA** | NVENC | ⚡⚡⚡ Fastest |
+| **Intel** | QSV | ⚡⚡ Fast |
+| **AMD** | AMF | ⚡⚡ Fast |
+| **None** | libx264 | ⚡ Software |
+
+**Linux**
+
+| GPU Vendor | Encoder | Detection |
+|------------|---------|-----------|
+| **NVIDIA** | NVENC | `nvidia-smi` |
+| **Intel** | QSV | `lspci` |
+| **AMD** | VA-API | `lspci` |
+| **None** | libx264 | Fallback |
 
 ---
 
@@ -233,11 +261,21 @@
 - **FFmpeg** - Media processing toolkit (auto-downloaded)
 
 ### System Requirements
+
+**Windows**
 - Windows 10/11 (x86 or x64)
-- PowerShell 5.1 or later
+- PowerShell 5.1 or later (built-in)
 - .NET Framework 4.5+
 - 500MB free disk space (for binaries)
 - Internet connection (for first run and downloads)
+
+**Linux**
+- Any modern x86_64 or arm64 distribution
+- PowerShell 7+ (`pwsh`)
+- `tar` (pre-installed everywhere)
+- 500MB free disk space (for binaries)
+- Internet connection (for first run and downloads)
+- Optional: `pciutils` (for AMD/Intel GPU detection via `lspci`)
 
 ### Optional Dependencies
 - **BurntToast** - Windows notifications (Phase 4)

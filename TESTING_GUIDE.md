@@ -8,10 +8,17 @@ This guide covers all available tests for the current implementation (Sprint 1 &
 
 ## Prerequisites
 
+**Windows**
 - Windows 10/11 (x86 or x64)
 - PowerShell 5.1 or later
 - Internet connection (for dependency downloads)
 - Administrator privileges (optional, for some tests)
+
+**Linux**
+- PowerShell 7+ (`pwsh`)
+- `tar` (pre-installed)
+- Internet connection (for dependency downloads)
+- Optional: `pciutils` for AMD/Intel GPU detection (`sudo apt install pciutils`)
 
 ---
 
@@ -19,10 +26,16 @@ This guide covers all available tests for the current implementation (Sprint 1 &
 
 **What it tests:** Environment setup, logging, configuration
 
-**Command:**
+**Windows:**
 ```powershell
-cd q:/mr.roboto
-.\roboto.ps1
+cd C:\path\to\msr
+.\roboto.bat
+```
+
+**Linux:**
+```bash
+cd /path/to/msr
+./roboto.sh
 ```
 
 **Expected Output:**
@@ -53,34 +66,28 @@ Initialization complete. Ready to acquire media.
 
 **What it tests:** Auto-download of yt-dlp and FFmpeg
 
-**Command:**
+**Windows:**
 ```powershell
-# Delete binaries first to test download
-Remove-Item -Path "q:/mr.roboto/bin" -Recurse -Force -ErrorAction SilentlyContinue
-.\roboto.ps1
+Remove-Item -Path ".\bin" -Recurse -Force -ErrorAction SilentlyContinue
+.\roboto.bat
 ```
 
-**Expected Output:**
-```
-[INFO] Checking dependencies...
-[INFO] yt-dlp not found, will download
-[INFO] FFmpeg not found, will download
-
-Downloading required dependencies...
-This may take a minute on first run.
-
-  Downloading yt-dlp... Done!
-  Downloading FFmpeg... Downloaded!
-  Extracting FFmpeg... Done!
-[INFO] Dependency check complete
+**Linux:**
+```bash
+rm -rf ./bin
+./roboto.sh
 ```
 
 **What to verify:**
-- ✅ `bin/x64/yt-dlp.exe` downloaded (or `bin/x86/` on 32-bit)
-- ✅ `bin/x64/ffmpeg.exe` downloaded
-- ✅ `bin/x64/ffprobe.exe` downloaded
-- ✅ Files are executable (not corrupted)
-- ✅ Download completes without errors
+
+*Windows:*
+- ✅ `bin/x64/yt-dlp.exe` downloaded
+- ✅ `bin/x64/ffmpeg.exe` and `ffprobe.exe` downloaded
+
+*Linux:*
+- ✅ `bin/x64/yt-dlp` downloaded and executable (`chmod +x` applied)
+- ✅ `bin/x64/ffmpeg` and `ffprobe` downloaded and executable
+- ✅ tar.xz archive correctly extracted (not zip)
 
 **Time:** ~30-60 seconds depending on internet speed
 
@@ -185,24 +192,34 @@ Get-Content q:/mr.roboto/logs/session_*.log | Select-Object -Last 20
 
 **What it tests:** Hardware capability detection
 
-**Command:**
-```powershell
-.\roboto.ps1
-```
+**Windows:** `.\roboto.bat` — **Linux:** `./roboto.sh`
 
 **Expected Results by GPU Type:**
 
+*Windows (WMI detection):*
+
 | GPU Type | Expected Encoder | Log Message |
 |----------|-----------------|-------------|
-| NVIDIA GeForce/RTX | `h264_nvenc` | "GPU detected: NVIDIA..." |
-| Intel HD/UHD Graphics | `h264_qsv` | "GPU detected: Intel..." |
-| AMD Radeon | `h264_amf` | "GPU detected: AMD..." |
-| No GPU / VM | `libx264` | "No dedicated GPU detected" |
+| NVIDIA GeForce/RTX | `h264_nvenc` | "GPU: NVIDIA... Encoder: h264_nvenc" |
+| Intel HD/UHD/Iris | `h264_qsv` | "GPU: Intel... Encoder: h264_qsv" |
+| AMD Radeon | `h264_amf` | "GPU: AMD... Encoder: h264_amf" |
+| No GPU / VM | `libx264` | "No dedicated GPU found" |
+
+*Linux (`nvidia-smi` / `lspci` detection):*
+
+| GPU Type | Expected Encoder | Detection Source |
+|----------|-----------------|-----------------|
+| NVIDIA (driver installed) | `h264_nvenc` | `nvidia-smi` |
+| Intel | `h264_qsv` | `lspci` |
+| AMD Radeon | `h264_vaapi` | `lspci` |
+| No GPU / `lspci` absent | `libx264` | Fallback |
+
+> AMD uses `h264_vaapi` on Linux — this is expected and correct. VA-API is the standard hardware video acceleration API on Linux.
 
 **What to verify:**
-- ✅ Correct GPU name displayed
-- ✅ Appropriate encoder selected
-- ✅ Architecture detected (x64 or x86)
+- ✅ Correct GPU name displayed in banner
+- ✅ Appropriate encoder selected for the platform
+- ✅ Architecture detected (`x64` or `arm64`)
 
 ---
 
@@ -210,13 +227,16 @@ Get-Content q:/mr.roboto/logs/session_*.log | Select-Object -Last 20
 
 **What it tests:** Installed binary versions
 
-**Command:**
+**Windows:**
 ```powershell
-# Check yt-dlp version
-& "q:/mr.roboto/bin/x64/yt-dlp.exe" --version
+& ".\bin\x64\yt-dlp.exe" --version
+& ".\bin\x64\ffmpeg.exe" -version
+```
 
-# Check FFmpeg version
-& "q:/mr.roboto/bin/x64/ffmpeg.exe" -version
+**Linux:**
+```bash
+./bin/x64/yt-dlp --version
+./bin/x64/ffmpeg -version
 ```
 
 **Expected Output:**
@@ -287,17 +307,16 @@ Set-ItemProperty q:/mr.roboto/logs -Name IsReadOnly -Value $true
 
 **What it tests:** Complete reset and reinstall
 
-**Command:**
+**Windows:**
 ```powershell
-# Delete everything except the script
-Remove-Item q:/mr.roboto/bin -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item q:/mr.roboto/logs -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item q:/mr.roboto/config.json -Force -ErrorAction SilentlyContinue
-Remove-Item q:/mr.roboto/downloads -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item q:/mr.roboto/cache -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item .\bin, .\logs, .\config.json, .\downloads, .\cache -Recurse -Force -ErrorAction SilentlyContinue
+.\roboto.bat
+```
 
-# Run script
-.\roboto.ps1
+**Linux:**
+```bash
+rm -rf ./bin ./logs ./config.json ./downloads ./cache
+./roboto.sh
 ```
 
 **Expected:** Full initialization as if first run
@@ -329,43 +348,42 @@ Remove-Item q:/mr.roboto/cache -Recurse -Force -ErrorAction SilentlyContinue
 
 ## Quick Test Script
 
-Run all basic tests automatically:
+Run all basic checks automatically (works on both Windows and Linux via `pwsh`):
 
 ```powershell
-# Save as test-roboto.ps1
+# Save as test-roboto.ps1 and run with: pwsh ./test-roboto.ps1
 Write-Host "=== Mr. Roboto Test Suite ===" -ForegroundColor Cyan
+Write-Host "Platform: $(if ($IsWindows) { 'Windows' } elseif ($IsLinux) { 'Linux' } else { 'macOS' })"
 Write-Host ""
 
-# Test 1: Basic run
-Write-Host "Test 1: Basic Initialization..." -ForegroundColor Yellow
-.\roboto.ps1
+# Test 1: Check files created
+Write-Host "Test 1: Verify directories and config..." -ForegroundColor Yellow
+$root = $PSScriptRoot
+foreach ($item in @('config.json','bin','downloads','logs','state','cache')) {
+    $exists = Test-Path (Join-Path $root $item)
+    Write-Host ("  {0,-15}: {1}" -f $item, (if ($exists) { '✅ PASS' } else { '❌ MISSING' }))
+}
 Write-Host ""
 
-# Test 2: Check files created
-Write-Host "Test 2: Verify Files..." -ForegroundColor Yellow
-$files = @(
-    "config.json",
-    "bin",
-    "downloads",
-    "logs",
-    "state",
-    "cache"
-)
-foreach ($file in $files) {
-    $exists = Test-Path "q:/mr.roboto/$file"
-    $status = if ($exists) { "✅ PASS" } else { "❌ FAIL" }
-    Write-Host "  $file : $status"
+# Test 2: Check binaries
+Write-Host "Test 2: Verify binaries..." -ForegroundColor Yellow
+$ext = if ($IsWindows) { '.exe' } else { '' }
+$arch = if ($IsWindows) { if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' } } else { 'x64' }
+foreach ($bin in @('yt-dlp', 'ffmpeg')) {
+    $path = Join-Path $root "bin/$arch/$bin$ext"
+    $exists = Test-Path $path
+    Write-Host ("  {0,-12}: {1}" -f $bin, (if ($exists) { '✅ PRESENT' } else { '⏳ NOT YET DOWNLOADED' }))
 }
 Write-Host ""
 
 # Test 3: Check log content
-Write-Host "Test 3: Log Content..." -ForegroundColor Yellow
-$logFile = Get-ChildItem q:/mr.roboto/logs/ | Select-Object -Last 1
+Write-Host "Test 3: Log content..." -ForegroundColor Yellow
+$logFile = Get-ChildItem (Join-Path $root 'logs') -Filter '*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
 if ($logFile) {
     Write-Host "  Latest log: $($logFile.Name)" -ForegroundColor Green
     Get-Content $logFile.FullName | Select-Object -Last 5
 } else {
-    Write-Host "  ❌ No log files found" -ForegroundColor Red
+    Write-Host "  ⏳ No log files yet (run roboto first)" -ForegroundColor Yellow
 }
 Write-Host ""
 
@@ -388,26 +406,37 @@ Once all tests pass:
 
 ## Troubleshooting
 
-### Issue: "Execution Policy" Error
+### Issue: "Execution Policy" Error (Windows)
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
+### Issue: `pwsh` not found (Linux)
+```bash
+sudo apt-get install -y powershell   # Ubuntu/Debian
+sudo dnf install powershell          # Fedora/RHEL
+```
+
+### Issue: `permission denied` on `roboto.sh` (Linux)
+```bash
+chmod +x roboto.sh
+```
+
 ### Issue: Binaries Won't Download
-- Check internet connection
-- Check firewall settings
-- Try manual download from GitHub
+- Check internet connection and firewall settings
+- Try manual download from GitHub and place in `bin/x64/`
 - Use `-OfflineMode` with pre-downloaded binaries
 
 ### Issue: GPU Not Detected
-- Update GPU drivers
-- Check Device Manager
-- Script will fallback to software encoding
+- Windows: update GPU drivers, check Device Manager
+- Linux (NVIDIA): install NVIDIA driver (`nvidia-smi` must be reachable in PATH)
+- Linux (AMD/Intel): `sudo apt install pciutils` so `lspci` is available
+- Script falls back to `libx264` (software encoding) automatically
 
 ### Issue: Log Files Not Created
-- Check write permissions
-- Run as administrator
-- Check disk space
+- Check write permissions on the project directory
+- Windows: run as administrator
+- Linux: ensure the project directory is not owned by root
 
 ---
 

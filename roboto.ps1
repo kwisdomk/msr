@@ -39,18 +39,27 @@ param(
     [Parameter(Mandatory = $false)][switch]$OfflineMode
 )
 
-#  Force TLS 1.2 (TLS 1.3 enum absent on PS5.1/.NET 4.x - bug #6 fixed) 
-try {
-    [Net.ServicePointManager]::SecurityProtocol =
-    [Net.SecurityProtocolType]::Tls12 -bor
-    [Net.SecurityProtocolType]::Tls11 -bor
-    [Net.SecurityProtocolType]::Tls
-    # Upgrade to Tls13 only if the enum exists (PS7+ / .NET5+)
-    $tls13 = [Net.SecurityProtocolType]::Tls13
-    [Net.ServicePointManager]::SecurityProtocol =
-    [Net.ServicePointManager]::SecurityProtocol -bor $tls13
+# Polyfill $IsWindows / $IsLinux / $IsMacOS for PowerShell 5.1 (Windows-only runtime)
+if ($null -eq (Get-Variable 'IsWindows' -ErrorAction SilentlyContinue)) {
+    New-Variable -Name IsWindows -Value $true  -Scope Script -Force
+    New-Variable -Name IsLinux   -Value $false -Scope Script -Force
+    New-Variable -Name IsMacOS   -Value $false -Scope Script -Force
 }
-catch { <# Tls13 not available on this runtime - harmless #> }
+
+#  Force TLS 1.2 (TLS 1.3 enum absent on PS5.1/.NET 4.x - bug #6 fixed)
+#  Not needed on Linux/.NET 6+ which negotiates TLS natively.
+if ($IsWindows) {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+        [Net.SecurityProtocolType]::Tls12 -bor
+        [Net.SecurityProtocolType]::Tls11 -bor
+        [Net.SecurityProtocolType]::Tls
+        $tls13 = [Net.SecurityProtocolType]::Tls13
+        [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor $tls13
+    }
+    catch { <# Tls13 not available on this runtime - harmless #> }
+}
 
 #  Script-level state 
 enum DownloadMode {
@@ -206,12 +215,16 @@ function Initialize-Config {
         # Use quoted key access to survive ConvertFrom-Json round-trips
         binaries = [ordered]@{
             "yt-dlp" = [ordered]@{
-                x64 = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-                x86 = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_x86.exe"
+                x64           = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+                x86           = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_x86.exe"
+                "linux-x64"   = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+                "linux-arm64" = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64"
             }
             ffmpeg   = [ordered]@{
-                x64 = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-                x86 = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win32-gpl.zip"
+                x64           = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+                x86           = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win32-gpl.zip"
+                "linux-x64"   = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+                "linux-arm64" = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz"
             }
         }
     }
@@ -250,39 +263,83 @@ function Initialize-Environment {
 
 # 
 #region  HARDWARE DETECTION
-# 
+#
+
+function Get-ArchInfo {
+    <# Returns @{ Arch = 'x64'; ConfigKey = 'x64' } on Windows,
+       @{ Arch = 'x64'; ConfigKey = 'linux-x64' } on Linux, etc. #>
+    if ($IsLinux -or $IsMacOS) {
+        $cpu = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLower()
+        return @{ Arch = $cpu; ConfigKey = "linux-$cpu" }
+    }
+    $a = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+    return @{ Arch = $a; ConfigKey = $a }
+}
 
 function Get-HardwareCapabilities {
     Write-Log "INFO" "Detecting hardware..."
-    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+    $arch = (Get-ArchInfo).Arch
 
-    try {
-        $allGpus = Get-CimInstance Win32_VideoController -ErrorAction Stop |
-        Where-Object { $_.Name -notlike "*Microsoft*" -and $_.Name -notlike "*Remote*" }
+    $gpuName = "None (Software)"
+    $encoder = "libx264"
 
-        # Prefer discrete GPUs: NVIDIA > AMD > Intel iGPU > first available
-        $gpu = $allGpus | Where-Object { $_.Name -match "NVIDIA|GeForce|GTX|RTX|Quadro" } | Select-Object -First 1
-        if (-not $gpu) { $gpu = $allGpus | Where-Object { $_.Name -match "AMD|Radeon|RX " }   | Select-Object -First 1 }
-        if (-not $gpu) { $gpu = $allGpus | Select-Object -First 1 }
+    if ($IsWindows) {
+        try {
+            $allGpus = Get-CimInstance Win32_VideoController -ErrorAction Stop |
+            Where-Object { $_.Name -notlike "*Microsoft*" -and $_.Name -notlike "*Remote*" }
 
-        if ($gpu) {
-            $gpuName = $gpu.Name
-            $encoder = if ($gpuName -match "NVIDIA|GeForce|GTX|RTX|Quadro") { "h264_nvenc" }
-            elseif ($gpuName -match "AMD|Radeon|RX ") { "h264_amf" }
-            elseif ($gpuName -match "Intel|HD Graphics|UHD|Iris") { "h264_qsv" }
-            else { "libx264" }
-            Write-Log "INFO" "GPU: $gpuName  Encoder: $encoder"
+            # Prefer discrete GPUs: NVIDIA > AMD > Intel iGPU > first available
+            $gpu = $allGpus | Where-Object { $_.Name -match "NVIDIA|GeForce|GTX|RTX|Quadro" } | Select-Object -First 1
+            if (-not $gpu) { $gpu = $allGpus | Where-Object { $_.Name -match "AMD|Radeon|RX " }   | Select-Object -First 1 }
+            if (-not $gpu) { $gpu = $allGpus | Select-Object -First 1 }
+
+            if ($gpu) {
+                $gpuName = $gpu.Name
+                $encoder = if     ($gpuName -match "NVIDIA|GeForce|GTX|RTX|Quadro") { "h264_nvenc" }
+                           elseif ($gpuName -match "AMD|Radeon|RX ")                { "h264_amf"   }
+                           elseif ($gpuName -match "Intel|HD Graphics|UHD|Iris")    { "h264_qsv"   }
+                           else                                                      { "libx264"    }
+                Write-Log "INFO" "GPU: $gpuName  Encoder: $encoder"
+            }
+            else {
+                Write-Log "WARN" "No dedicated GPU found; falling back to libx264."
+            }
         }
-        else {
-            $gpuName = "None (Software)"
-            $encoder = "libx264"
-            Write-Log "WARN" "No dedicated GPU found; falling back to libx264."
+        catch {
+            $gpuName = "Detection Failed"
+            Write-Log "WARN" "GPU query error: $($_.Exception.Message)"
         }
     }
-    catch {
-        $gpuName = "Detection Failed"
-        $encoder = "libx264"
-        Write-Log "WARN" "GPU query error: $($_.Exception.Message)"
+    elseif ($IsLinux) {
+        # NVIDIA: nvidia-smi is the most reliable source
+        $nvSmi = Get-Command 'nvidia-smi' -ErrorAction SilentlyContinue
+        if ($nvSmi) {
+            $detected = (& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1).Trim()
+            $gpuName  = if ($detected) { $detected } else { 'NVIDIA GPU' }
+            $encoder  = 'h264_nvenc'
+            Write-Log "INFO" "NVIDIA GPU detected via nvidia-smi: $gpuName"
+        }
+        else {
+            # Fallback: parse lspci for VGA/3D/Display controllers
+            $lspci = Get-Command 'lspci' -ErrorAction SilentlyContinue
+            if ($lspci) {
+                $vgaLine = (& lspci 2>$null | Select-String -Pattern 'VGA|3D|Display' | Select-Object -First 1).ToString()
+                if ($vgaLine) {
+                    $gpuName = if ($vgaLine -match ':\s+(.+)$') { $matches[1].Trim() } else { $vgaLine.Trim() }
+                    $encoder = if     ($vgaLine -match 'NVIDIA|GeForce|GTX|RTX|Quadro') { 'h264_nvenc' }
+                               elseif ($vgaLine -match 'AMD|Radeon|ATI')                { 'h264_vaapi' }
+                               elseif ($vgaLine -match 'Intel')                         { 'h264_qsv'   }
+                               else                                                      { 'libx264'    }
+                    Write-Log "INFO" "GPU (lspci): $gpuName  Encoder: $encoder"
+                }
+                else {
+                    Write-Log "WARN" "No VGA/Display device found in lspci; falling back to libx264."
+                }
+            }
+            else {
+                Write-Log "WARN" "lspci not found; GPU detection skipped. Falling back to libx264."
+            }
+        }
     }
 
     return @{ GPU = $gpuName; Encoder = $encoder; Architecture = $arch }
@@ -297,8 +354,9 @@ function Get-HardwareCapabilities {
 function Find-Binary {
     param([Parameter(Mandatory)][string]$Name)
 
-    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-    $localPath = Join-Path $script:ScriptRoot "bin/$arch/$Name.exe"
+    $arch = (Get-ArchInfo).Arch
+    $ext  = if ($IsWindows) { '.exe' } else { '' }
+    $localPath = Join-Path $script:ScriptRoot "bin/$arch/$Name$ext"
 
     if (Test-Path $localPath) {
         Write-Log "DEBUG" "$Name found in local bin: $localPath"
@@ -338,14 +396,14 @@ function Install-Binary {
         [string]$Name
     )
 
-    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-    $binDir = Join-Path $script:ScriptRoot "bin/$arch"
+    $archInfo  = Get-ArchInfo
+    $binDir    = Join-Path $script:ScriptRoot "bin/$($archInfo.Arch)"
+    $configKey = $archInfo.ConfigKey
 
-    # Bug #4 fixed: bracket notation for hyphenated key 'yt-dlp'
-    $url = $script:Config.binaries."$Name"."$arch"
+    $url = $script:Config.binaries."$Name"."$configKey"
 
     if (-not $url) {
-        Write-Log "ERROR" "No download URL found for $Name ($arch) in config.json."
+        Write-Log "ERROR" "No download URL found for $Name ($configKey) in config.json."
         throw "Missing URL for $Name"
     }
 
@@ -353,37 +411,53 @@ function Install-Binary {
 
     try {
         if ($Name -eq 'yt-dlp') {
-            $dest = Join-Path $binDir "yt-dlp.exe"
+            $ext  = if ($IsWindows) { '.exe' } else { '' }
+            $dest = Join-Path $binDir "yt-dlp$ext"
             Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+            if (-not $IsWindows) { & chmod +x $dest }
             Write-Log "INFO" "yt-dlp installed  $dest"
         }
         else {
-            # FFmpeg arrives as a zip; BtbN layout: ffmpeg-master-*/bin/{ffmpeg,ffprobe}.exe
-            $zipDest = Join-Path $script:ScriptRoot "cache/ffmpeg_download.zip"
             $cacheDir = Join-Path $script:ScriptRoot "cache/ffmpeg_extract"
-
-            Invoke-WebRequest -Uri $url -OutFile $zipDest -UseBasicParsing
-
-            # Clean extract target to avoid stale trees (bug #5 fixed)
             if (Test-Path $cacheDir) { Remove-Item $cacheDir -Recurse -Force }
             New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
-            Expand-Archive -Path $zipDest -DestinationPath $cacheDir -Force
 
-            $innerBin = Get-ChildItem $cacheDir -Recurse -Filter "ffmpeg.exe" |
-            Select-Object -First 1
+            if ($IsWindows) {
+                # Windows: BtbN zip  →  ffmpeg-master-*/bin/{ffmpeg,ffprobe}.exe
+                $archiveDest = Join-Path $script:ScriptRoot "cache/ffmpeg_download.zip"
+                Invoke-WebRequest -Uri $url -OutFile $archiveDest -UseBasicParsing
+                Expand-Archive -Path $archiveDest -DestinationPath $cacheDir -Force
 
-            if (-not $innerBin) { throw "ffmpeg.exe not found inside the zip archive." }
-
-            $ffBinDir = $innerBin.DirectoryName
-            foreach ($exe in @('ffmpeg.exe', 'ffprobe.exe')) {
-                $src = Join-Path $ffBinDir $exe
-                if (Test-Path $src) {
-                    Copy-Item $src $binDir -Force
-                    Write-Log "INFO" "$exe installed  $binDir"
+                $innerBin = Get-ChildItem $cacheDir -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+                if (-not $innerBin) { throw "ffmpeg.exe not found inside the zip archive." }
+                $ffBinDir = $innerBin.DirectoryName
+                foreach ($exe in @('ffmpeg.exe', 'ffprobe.exe')) {
+                    $src = Join-Path $ffBinDir $exe
+                    if (Test-Path $src) { Copy-Item $src $binDir -Force; Write-Log "INFO" "$exe installed  $binDir" }
                 }
+                Remove-Item $archiveDest -Force -ErrorAction SilentlyContinue
+            }
+            else {
+                # Linux: BtbN tar.xz  →  ffmpeg-master-*/bin/{ffmpeg,ffprobe}
+                $archiveDest = Join-Path $script:ScriptRoot "cache/ffmpeg_download.tar.xz"
+                Invoke-WebRequest -Uri $url -OutFile $archiveDest -UseBasicParsing
+                & tar -xJf $archiveDest -C $cacheDir
+
+                $innerBin = Get-ChildItem $cacheDir -Recurse -Filter "ffmpeg" |
+                            Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+                if (-not $innerBin) { throw "ffmpeg binary not found inside the tar archive." }
+                $ffBinDir = $innerBin.DirectoryName
+                foreach ($bin in @('ffmpeg', 'ffprobe')) {
+                    $src = Join-Path $ffBinDir $bin
+                    if (Test-Path $src) {
+                        Copy-Item $src $binDir -Force
+                        & chmod +x (Join-Path $binDir $bin)
+                        Write-Log "INFO" "$bin installed  $binDir"
+                    }
+                }
+                Remove-Item $archiveDest -Force -ErrorAction SilentlyContinue
             }
 
-            Remove-Item $zipDest  -Force -ErrorAction SilentlyContinue
             Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
             Write-Log "INFO" "FFmpeg installed successfully."
         }
@@ -426,7 +500,8 @@ function Install-Dependencies {
         Write-Host '  [WARN] Deno runtime not detected.' -ForegroundColor Yellow
         Write-Host '  yt-dlp uses Deno for JavaScript extraction. Without it,' -ForegroundColor DarkYellow
         Write-Host '  some formats are silently skipped and quality may degrade.' -ForegroundColor DarkYellow
-        Write-Host '  Install: winget install DenoLand.Deno  (then restart this terminal)' -ForegroundColor Cyan
+        $denoHint = if ($IsWindows) { 'winget install DenoLand.Deno' } else { 'curl -fsSL https://deno.land/install.sh | sh' }
+        Write-Host "  Install: $denoHint  (then restart this terminal)" -ForegroundColor Cyan
         Write-Host ''
     }
 
@@ -596,9 +671,18 @@ function Get-FailureType {
 
 #endregion
 
-# 
+#
 #region  DOWNLOAD ORCHESTRATION
-# 
+#
+
+function Get-DefaultCookieBrowser {
+    <# Returns the first available browser name for --cookies-from-browser, or $null. #>
+    if ($IsWindows) { return 'edge' }
+    foreach ($b in @('firefox', 'chrome', 'chromium', 'brave', 'vivaldi', 'opera')) {
+        if (Get-Command $b -ErrorAction SilentlyContinue) { return $b }
+    }
+    return $null
+}
 
 function Start-MediaAcquisition {
     param(
@@ -625,11 +709,12 @@ function Start-MediaAcquisition {
     # Save state before starting (resume support)
     $sessionId = Get-Date -Format "yyyyMMdd_HHmmss"
     Save-DownloadState @{
-        sessionId = $sessionId
-        url       = $TargetUrl
-        profile   = $QualityProfile
-        status    = "in_progress"
-        timestamp = (Get-Date -Format "o")
+        sessionId   = $sessionId
+        url         = $TargetUrl
+        profile     = $QualityProfile
+        downloadDir = $downloadDir
+        status      = "in_progress"
+        timestamp   = (Get-Date -Format "o")
     }
 
     # Detect audio-only mode (profile has audioOnly flag)
@@ -720,10 +805,13 @@ function Start-MediaAcquisition {
     $publicArgs.AddRange($coreArgs)
     $publicArgs.Add('--no-cookies')
 
+    $cookieBrowser = Get-DefaultCookieBrowser
     $authArgs = New-Object System.Collections.Generic.List[string]
     $authArgs.AddRange($coreArgs)
-    $authArgs.Add('--cookies-from-browser')
-    $authArgs.Add('edge')
+    if ($cookieBrowser) {
+        $authArgs.Add('--cookies-from-browser')
+        $authArgs.Add($cookieBrowser)
+    }
 
     # Start unconditionally in Public Mode
     $script:DownloadMode = [DownloadMode]::Public
@@ -806,8 +894,15 @@ function Start-MediaAcquisition {
             Write-Log "WARN" "Failure classified as: $failType"
 
             if ($failType -eq "Auth") {
-                Write-Host "  Sign-in required. Escalating to browser cookies..." -ForegroundColor Yellow
-                $script:DownloadMode = [DownloadMode]::EscalatedAuth
+                if ($cookieBrowser) {
+                    Write-Host "  Sign-in required. Escalating to $cookieBrowser cookies..." -ForegroundColor Yellow
+                    $script:DownloadMode = [DownloadMode]::EscalatedAuth
+                }
+                else {
+                    Write-Host "  Sign-in required but no supported browser found for cookie auth." -ForegroundColor Red
+                    Write-Host "  Install Firefox or Chrome, then retry." -ForegroundColor Yellow
+                    break
+                }
             }
             elseif ($failType -eq "Transient") {
                 Write-Host "  Network issue. Retrying in 5s..." -ForegroundColor Magenta
@@ -815,7 +910,7 @@ function Start-MediaAcquisition {
                 Start-Sleep -Seconds 5
             }
             else {
-                Write-Host "  Download failed - see logs\ for details." -ForegroundColor Red
+                Write-Host "  Download failed - see logs/ for details." -ForegroundColor Red
                 break
             }
         }
@@ -843,24 +938,34 @@ function Start-MediaAcquisition {
 function Select-DownloadLocation {
     <#
     Determines where downloaded files will land.
-    Audio profiles  OS Music folder; video profiles  OS Videos folder.
+    Audio profiles -> OS Music folder; video profiles -> OS Videos folder.
     User can override with a custom path at the prompt.
     Sets $script:DownloadDir which Start-MediaAcquisition reads.
     #>
     param([Parameter(Mandatory)][string]$QualityProfile)
 
     $isAudio = $QualityProfile -like 'audio-*'
+    $label   = if ($isAudio) { 'Music' } else { 'Videos' }
 
-    if ($isAudio) {
-        $nativeDir = [Environment]::GetFolderPath('MyMusic')
-        $label = 'Music'
+    if ($IsWindows) {
+        $nativeDir = if ($isAudio) {
+            [Environment]::GetFolderPath('MyMusic')
+        } else {
+            [Environment]::GetFolderPath('MyVideos')
+        }
     }
     else {
-        $nativeDir = [Environment]::GetFolderPath('MyVideos')
-        $label = 'Videos'
+        # Linux/macOS: prefer XDG user dirs, fall back to ~/Music or ~/Videos
+        $xdgKey    = if ($isAudio) { 'MUSIC' } else { 'VIDEOS' }
+        $xdgResult = try { (& xdg-user-dir $xdgKey 2>$null).Trim() } catch { '' }
+        $nativeDir = if (-not [string]::IsNullOrWhiteSpace($xdgResult)) {
+            $xdgResult
+        } else {
+            Join-Path $HOME (if ($isAudio) { 'Music' } else { 'Videos' })
+        }
     }
 
-    # Fallback to local /downloads if the OS shell folder is unavailable
+    # Fallback to local /downloads if still empty
     if ([string]::IsNullOrWhiteSpace($nativeDir)) {
         $nativeDir = Join-Path $script:ScriptRoot 'downloads'
     }
@@ -909,6 +1014,14 @@ function Start-InteractiveMode {
         Write-Host "    Profile : $($state.profile)" -ForegroundColor White
         $ans = Read-Host "  Resume this download? [Y/N]"
         if ($ans -match '^[Yy]') {
+            # Restore download directory from state; fall back to Select-DownloadLocation if missing
+            if (-not [string]::IsNullOrWhiteSpace($state.downloadDir)) {
+                $script:DownloadDir = $state.downloadDir
+                Write-Log 'INFO' "Restored download directory from state: $script:DownloadDir"
+            }
+            else {
+                Select-DownloadLocation -QualityProfile $state.profile
+            }
             Start-MediaAcquisition -TargetUrl $state.url -QualityProfile $state.profile
         }
         else {
@@ -989,6 +1102,13 @@ function Start-InteractiveMode {
 # 
 
 function Main {
+    # PS 5.1 is Windows-only; Linux/macOS require PS 7+
+    if ((-not $IsWindows) -and ($PSVersionTable.PSVersion.Major -lt 7)) {
+        Write-Host "[ERROR] Mr. Roboto requires PowerShell 7+ on Linux/macOS." -ForegroundColor Red
+        Write-Host "  Install: https://aka.ms/install-powershell" -ForegroundColor Yellow
+        exit 1
+    }
+
     try {
         Initialize-Environment
         Show-Spinner -Message 'Checking dependencies...' -Seconds 1

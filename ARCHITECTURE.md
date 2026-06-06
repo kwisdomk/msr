@@ -185,40 +185,57 @@ sequenceDiagram
 - Module orchestration
 - Configuration management
 - Session lifecycle
+- Cross-platform OS detection
 
 **Key Functions:**
-- `Main()` - Entry point
+- `Main()` - Entry point (includes PS7 version guard on Linux)
 - `Initialize-Environment()` - Setup
 - `Get-Config()` - Load configuration
 - `Set-Config()` - Save configuration
 
+**Platform shim** — defined at startup, safe for PS5.1:
+```powershell
+if ($null -eq (Get-Variable 'IsWindows' -ErrorAction SilentlyContinue)) {
+    New-Variable -Name IsWindows -Value $true  -Scope Script -Force
+    New-Variable -Name IsLinux   -Value $false -Scope Script -Force
+    New-Variable -Name IsMacOS   -Value $false -Scope Script -Force
+}
+```
+
 ### 2. Bootstrapper Module
 
 **Responsibilities:**
-- Dependency detection
-- Binary acquisition
-- Checksum verification
+- Dependency detection (cross-platform binary names)
+- Binary acquisition (zip on Windows, tar.xz on Linux)
+- Architecture-aware URL selection
 - Version management
 
 **Key Functions:**
-- `Find-Binary($Name)` - Locate executable
+- `Get-ArchInfo()` - Returns `{ Arch, ConfigKey }` — single source of truth for platform/arch
+- `Find-Binary($Name)` - Locate executable (no `.exe` on Linux)
 - `Install-Dependencies()` - Download binaries
-- `Test-BinaryVersion($Path)` - Check version
-- `Update-Binary($Name)` - Update to latest
+- `Install-Binary($Name)` - Platform-branched download and extraction
 
 ### 3. Hardware Detection Module
 
 **Responsibilities:**
-- GPU enumeration
-- Encoder selection
+- GPU enumeration (WMI on Windows, `nvidia-smi`/`lspci` on Linux)
+- Encoder selection (encoder names differ by platform for AMD)
 - Architecture detection
 - Capability profiling
 
 **Key Functions:**
-- `Get-HardwareCapabilities()` - Full hardware scan
-- `Get-GpuInfo()` - GPU details
-- `Select-Encoder($GpuVendor)` - Choose encoder
-- `Test-EncoderSupport($Encoder)` - Validate encoder
+- `Get-HardwareCapabilities()` - Full hardware scan (cross-platform)
+- `Get-ArchInfo()` - CPU architecture detection
+
+**Encoder mapping:**
+
+| GPU | Windows | Linux |
+|-----|---------|-------|
+| NVIDIA | `h264_nvenc` | `h264_nvenc` |
+| Intel | `h264_qsv` | `h264_qsv` |
+| AMD | `h264_amf` | `h264_vaapi` |
+| None | `libx264` | `libx264` |
 
 ### 4. User Interface Module
 
@@ -281,11 +298,15 @@ sequenceDiagram
 ```
 /MrRoboto/
 │
-├── roboto.ps1                      # Main entry point (1000+ lines)
+├── roboto.bat                      # Windows launcher
+├── roboto.sh                       # Linux/macOS launcher (requires pwsh)
+├── roboto.ps1                      # Main entry point (~1100 lines, cross-platform)
 │   ├── Main()
+│   ├── Get-ArchInfo()              # Platform/arch helper
+│   ├── Get-DefaultCookieBrowser()  # OS-aware browser detection
 │   ├── Initialize-Environment()
 │   ├── Install-Dependencies()
-│   ├── Get-HardwareCapabilities()
+│   ├── Get-HardwareCapabilities()  # WMI on Windows, nvidia-smi/lspci on Linux
 │   ├── Show-Banner()
 │   ├── Show-Menu()
 │   ├── Start-MediaAcquisition()
@@ -295,16 +316,19 @@ sequenceDiagram
 │   ├── version
 │   ├── settings
 │   ├── profiles
-│   └── binaries
+│   └── binaries                   # Keyed by x64/x86/linux-x64/linux-arm64
 │
 ├── /bin/                           # Binaries (auto-managed)
 │   ├── /x64/
-│   │   ├── yt-dlp.exe             # 64-bit yt-dlp
-│   │   ├── ffmpeg.exe             # 64-bit FFmpeg
-│   │   └── ffprobe.exe            # 64-bit FFprobe
-│   └── /x86/
-│       ├── yt-dlp.exe             # 32-bit yt-dlp
-│       └── ffmpeg.exe             # 32-bit FFmpeg
+│   │   ├── yt-dlp.exe             # Windows 64-bit
+│   │   ├── yt-dlp                 # Linux x86_64
+│   │   ├── ffmpeg.exe             # Windows 64-bit
+│   │   ├── ffmpeg                 # Linux x86_64
+│   │   └── ffprobe / ffprobe.exe
+│   ├── /x86/                      # Windows 32-bit only
+│   │   └── yt-dlp.exe / ffmpeg.exe
+│   └── /arm64/                    # Linux ARM64 (e.g. Raspberry Pi)
+│       └── yt-dlp / ffmpeg
 │
 ├── /downloads/                     # Output directory
 │   └── [Media files]
@@ -337,37 +361,35 @@ sequenceDiagram
     "libraryMode": false
   },
   "profiles": {
-    "ultra": {
-      "format": "bestvideo[height<=2160]+bestaudio/best",
-      "container": "mkv",
-      "videoCodec": "auto",
-      "audioCodec": "aac"
-    },
-    "high": {
-      "format": "bestvideo[height<=1080]+bestaudio/best",
-      "container": "mp4",
-      "videoCodec": "auto",
-      "audioCodec": "aac"
-    },
-    "mobile": {
-      "format": "bestvideo[height<=720]+bestaudio/best",
-      "container": "mp4",
-      "videoCodec": "h264",
-      "audioCodec": "aac"
-    }
+    "ultra":      { "format": "bestvideo[height<=2160]+bestaudio/best", "container": "mkv" },
+    "high":       { "format": "bestvideo[height<=1080]+bestaudio/best", "container": "mp4" },
+    "mobile":     { "format": "bestvideo[height<=720]+bestaudio/best",  "container": "mp4" },
+    "audio-flac": { "audioOnly": true, "audioFormat": "flac" },
+    "audio-opus": { "audioOnly": true, "audioFormat": "opus" },
+    "audio-mp3":  { "audioOnly": true, "audioFormat": "mp3", "audioQuality": "320K" }
   },
   "binaries": {
-    "ytdlp": {
-      "x64": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
-      "x86": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_x86.exe"
+    "yt-dlp": {
+      "x64":         "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+      "x86":         "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_x86.exe",
+      "linux-x64":   "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux",
+      "linux-arm64": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64"
     },
     "ffmpeg": {
-      "x64": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
-      "x86": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win32-gpl.zip"
+      "x64":         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+      "x86":         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win32-gpl.zip",
+      "linux-x64":   "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+      "linux-arm64": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz"
     }
   }
 }
 ```
+
+`Get-ArchInfo` maps the current runtime to the correct config key:
+- Windows x64 → `x64`
+- Windows x86 → `x86`
+- Linux x86_64 → `linux-x64`
+- Linux aarch64 → `linux-arm64`
 
 ## State Management
 

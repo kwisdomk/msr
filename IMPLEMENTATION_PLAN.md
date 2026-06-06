@@ -6,9 +6,9 @@
 
 **Scope:** Phase 1 (Bootstrapper Core) + Phase 2 (Interactive Menu System)
 
-**Target Platform:** Windows 10/11 (x86/x64)
+**Target Platform:** Windows 10/11 (x86/x64) and Linux (x86_64/arm64)
 
-**Primary Language:** PowerShell 5.1+ (compatible with Windows PowerShell and PowerShell Core)
+**Primary Language:** PowerShell 5.1+ on Windows; PowerShell 7+ on Linux
 
 ---
 
@@ -547,9 +547,18 @@ try {
 - **PSScriptAnalyzer** - Code quality (development)
 
 ### System Requirements
+
+**Windows**
 - Windows 10/11 (x86/x64)
 - PowerShell 5.1 or later
 - .NET Framework 4.5+
+- 500MB free disk space (for binaries)
+- Internet connection (for downloads)
+
+**Linux**
+- Any modern x86_64 or arm64 distribution
+- PowerShell 7+ (`pwsh`)
+- `tar` (pre-installed)
 - 500MB free disk space (for binaries)
 - Internet connection (for downloads)
 

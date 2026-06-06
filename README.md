@@ -31,29 +31,43 @@ A portable, self-healing PowerShell automation suite for high-fidelity media acq
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Windows 10 or 11 (x86 or x64)
-- PowerShell 5.1 or later
+
+**Windows 10/11**
+- PowerShell 5.1 or later (built-in)
 - Internet connection (for first run)
+
+**Linux**
+- PowerShell 7+ (`pwsh`) — [install guide](https://aka.ms/install-powershell)
+- `tar` (pre-installed on all major distros)
+- Internet connection (for first run)
+- Optional: `lspci` (GPU detection on non-NVIDIA systems) — `sudo apt install pciutils`
+- Optional: `nvidia-smi` (NVIDIA GPU detection) — install via your NVIDIA driver package
 
 ### Installation
 
-1. **Download Mr. Roboto**
-   ```powershell
-   # Clone or download this repository
+1. **Clone the repository**
+   ```bash
    git clone https://github.com/kwisdomk/msr.git
    cd msr
    ```
 
 2. **Run Mr. Roboto**
 
-   **Double-click `roboto.bat`** — that's it.
+   **Windows** — double-click `roboto.bat`, or from PowerShell:
+   ```powershell
+   .\roboto.bat
+   ```
+   > The bat file sets the execution policy automatically (process-scoped — no system-wide changes).
 
-   > ⚠️ **Always use `roboto.bat`**, not `roboto.ps1` directly.  
-   > The bat file handles the PowerShell execution policy automatically (process-scoped bypass — no system-wide changes).
+   **Linux**
+   ```bash
+   ./roboto.sh
+   ```
+   > `roboto.sh` requires `pwsh` (PowerShell 7+). It will error with an install link if `pwsh` is not found.
 
 On first run, Mr. Roboto will:
 - Create necessary directories
-- Download yt-dlp and FFmpeg
+- Download yt-dlp and FFmpeg (platform-appropriate binaries)
 - Detect your GPU capabilities
 - **Prompt you to select a browser for YouTube cookie authentication**
 - Present the interactive menu
@@ -162,15 +176,19 @@ Edit `config.json` to customize behavior:
 
 ```
 /MrRoboto/
-├── roboto.bat              # ← Launch this (handles execution policy)
-├── roboto.ps1              # Core script (do not run directly)
+├── roboto.bat              # ← Windows launcher (handles execution policy)
+├── roboto.sh               # ← Linux/macOS launcher (requires pwsh)
+├── roboto.ps1              # Core script (cross-platform)
 ├── config.json             # Configuration (includes browserCookies setting)
 ├── README.md               # This file
 ├── /bin/                   # Auto-downloaded binaries
 │   ├── /x64/
-│   │   ├── yt-dlp.exe
-│   │   └── ffmpeg.exe
-│   └── /x86/
+│   │   ├── yt-dlp.exe      # Windows
+│   │   ├── yt-dlp          # Linux
+│   │   ├── ffmpeg.exe      # Windows
+│   │   └── ffmpeg          # Linux
+│   ├── /x86/               # Windows 32-bit only
+│   └── /arm64/             # Linux ARM64 (Raspberry Pi, etc.)
 ├── /downloads/             # Your downloaded media
 ├── /logs/                  # Session logs
 ├── /state/                 # Resume data
@@ -183,12 +201,25 @@ Edit `config.json` to customize behavior:
 
 Mr. Roboto automatically detects and uses GPU acceleration:
 
+**Windows**
+
 | GPU Vendor | Encoder | Performance |
 |------------|---------|-------------|
 | **NVIDIA** | NVENC | ⚡⚡⚡ Fastest |
 | **Intel** | QSV | ⚡⚡ Fast |
 | **AMD** | AMF | ⚡⚡ Fast |
 | **None** | libx264 | ⚡ Software |
+
+**Linux**
+
+| GPU Vendor | Encoder | Detection Method |
+|------------|---------|-----------------|
+| **NVIDIA** | NVENC | `nvidia-smi` |
+| **Intel** | QSV | `lspci` |
+| **AMD** | VA-API | `lspci` |
+| **None** | libx264 | Fallback |
+
+> On Linux, AMD uses `h264_vaapi` (VA-API) rather than AMF, which is the standard hardware video acceleration API on Linux.
 
 No configuration needed - it just works!
 
@@ -228,20 +259,38 @@ Log levels:
 ### "FFmpeg not found"
 - Mr. Roboto will auto-download on first run
 - Check your internet connection
-- Manually download from: https://github.com/BtbN/FFmpeg-Builds/releases
+- Windows: manually download from https://github.com/BtbN/FFmpeg-Builds/releases
+- Linux: `sudo apt install ffmpeg` (or your distro's equivalent) then re-run
 
 ### "Download failed" / YouTube bot detection
-- Mr. Roboto will detect the bot-detection error automatically and re-prompt for browser cookies
+- Mr. Roboto will detect the bot-detection error automatically and escalate to browser cookies
 - Make sure you are **logged into YouTube** in the browser you select
 - Close the browser before running Mr. Roboto (some browsers lock the cookie database)
-- To change your browser choice, edit `config.json` → `settings.browserCookies`
-- Supported values: `chrome`, `firefox`, `edge`, `brave`, `vivaldi`, `opera`, `chromium`, `none`
+- **Linux**: supported browsers for cookie auth are `firefox`, `chrome`, `chromium`, `brave`, `vivaldi`, `opera` — at least one must be installed
+- **Windows**: defaults to `edge`
 - Check `/logs/` for the full error output
 
 ### "GPU not detected"
-- Mr. Roboto will fallback to software encoding
-- Update your GPU drivers
-- Check GPU is enabled in Device Manager
+- Mr. Roboto will fallback to software encoding (`libx264`)
+- **Windows**: update GPU drivers and check Device Manager
+- **Linux (NVIDIA)**: ensure the NVIDIA driver is installed — `nvidia-smi` should return GPU info
+- **Linux (AMD/Intel)**: install `pciutils` (`sudo apt install pciutils`) so `lspci` is available
+
+### Linux: "pwsh not found"
+Install PowerShell 7:
+```bash
+# Ubuntu/Debian
+sudo apt-get install -y wget apt-transport-https
+wget -q "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb"
+sudo dpkg -i packages-microsoft-prod.deb
+sudo apt-get update && sudo apt-get install -y powershell
+```
+Or visit: https://aka.ms/install-powershell
+
+### Linux: Permission denied on `roboto.sh`
+```bash
+chmod +x roboto.sh
+```
 
 ---
 

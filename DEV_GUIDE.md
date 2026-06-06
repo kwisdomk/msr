@@ -10,6 +10,7 @@ This guide provides practical implementation details for developers building Mr.
 
 ### Prerequisites
 
+**Windows**
 ```powershell
 # Check PowerShell version (need 5.1+)
 $PSVersionTable.PSVersion
@@ -21,12 +22,28 @@ Get-ExecutionPolicy
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
+**Linux**
+```bash
+# Install PowerShell 7+ (Ubuntu/Debian example)
+sudo apt-get install -y wget apt-transport-https
+wget -q "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb"
+sudo dpkg -i packages-microsoft-prod.deb
+sudo apt-get update && sudo apt-get install -y powershell
+
+# Verify
+pwsh --version   # Should print: PowerShell 7.x.x
+
+# Optional: GPU detection tools
+sudo apt install pciutils   # lspci for AMD/Intel GPU detection
+# For NVIDIA: install the NVIDIA driver package which includes nvidia-smi
+```
+
 ### Recommended Tools
 
-- **VS Code** with PowerShell extension
+- **VS Code** with PowerShell extension (works on Windows and Linux)
 - **PSScriptAnalyzer** for linting
 - **Pester** for testing (optional)
-- **Windows Terminal** for testing UI
+- **Windows Terminal** or any modern terminal for testing UI
 
 ---
 
@@ -260,168 +277,73 @@ function Write-Log {
 
 ### 4. GPU Detection
 
+GPU detection is cross-platform. Windows uses WMI (`Get-CimInstance`); Linux uses `nvidia-smi` for NVIDIA and `lspci` for AMD/Intel. The encoder selected also differs — AMD uses `h264_vaapi` on Linux (VA-API) instead of `h264_amf`.
+
 ```powershell
-function Get-HardwareCapabilities {
-    <#
-    .SYNOPSIS
-        Detect GPU and determine optimal encoder
-    #>
-    
-    Write-Log "INFO" "Detecting hardware capabilities..."
-    
-    # Detect architecture
-    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-    
-    # Query GPU
-    try {
-        $gpu = Get-CimInstance -ClassName Win32_VideoController | 
-               Where-Object { $_.Name -notlike "*Microsoft*" } |
-               Select-Object -First 1
-        
-        if ($gpu) {
-            $gpuName = $gpu.Name
-            Write-Log "INFO" "GPU detected: $gpuName"
-            
-            # Determine encoder
-            $encoder = if ($gpuName -match "NVIDIA") {
-                "h264_nvenc"
-            } elseif ($gpuName -match "Intel") {
-                "h264_qsv"
-            } elseif ($gpuName -match "AMD|Radeon") {
-                "h264_amf"
-            } else {
-                "libx264"
-            }
-            
-            Write-Log "INFO" "Selected encoder: $encoder"
-        } else {
-            $gpuName = "None (Software)"
-            $encoder = "libx264"
-            Write-Log "WARN" "No GPU detected, using software encoding"
-        }
+# Helper: returns { Arch = 'x64', ConfigKey = 'x64' } on Windows
+#                 { Arch = 'x64', ConfigKey = 'linux-x64' } on Linux
+function Get-ArchInfo {
+    if ($IsLinux -or $IsMacOS) {
+        $cpu = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLower()
+        return @{ Arch = $cpu; ConfigKey = "linux-$cpu" }
     }
-    catch {
-        $gpuName = "Detection Failed"
-        $encoder = "libx264"
-        Write-Log "WARN" "GPU detection failed: $_"
-    }
-    
-    return @{
-        GPU = $gpuName
-        Encoder = $encoder
-        Architecture = $arch
-    }
+    $a = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+    return @{ Arch = $a; ConfigKey = $a }
 }
 ```
+
+Encoder selection by platform:
+
+| GPU | Windows Encoder | Linux Encoder |
+|-----|----------------|---------------|
+| NVIDIA | `h264_nvenc` | `h264_nvenc` |
+| Intel | `h264_qsv` | `h264_qsv` |
+| AMD | `h264_amf` | `h264_vaapi` |
+| None | `libx264` | `libx264` |
 
 ### 5. Binary Management
 
+`Get-ArchInfo` is the single source of truth for both the local `bin/` directory name and the config key used to pick a download URL:
+
 ```powershell
 function Find-Binary {
-    <#
-    .SYNOPSIS
-        Locate binary in local bin or PATH
-    #>
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Name
-    )
-    
-    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-    $localPath = Join-Path $script:ScriptRoot "bin/$arch/$Name.exe"
-    
-    # Check local bin
-    if (Test-Path $localPath) {
-        Write-Log "DEBUG" "Found $Name in local bin"
-        return $localPath
-    }
-    
-    # Check PATH
-    $pathBinary = Get-Command $Name -ErrorAction SilentlyContinue
-    if ($pathBinary) {
-        Write-Log "DEBUG" "Found $Name in PATH: $($pathBinary.Source)"
-        return $pathBinary.Source
-    }
-    
-    Write-Log "DEBUG" "$Name not found"
+    param([Parameter(Mandatory)][string]$Name)
+
+    $arch = (Get-ArchInfo).Arch
+    $ext  = if ($IsWindows) { '.exe' } else { '' }
+    $localPath = Join-Path $script:ScriptRoot "bin/$arch/$Name$ext"
+
+    if (Test-Path $localPath) { return $localPath }
+
+    $sys = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($sys) { return $sys.Source }
+
     return $null
 }
+```
 
-function Install-Dependencies {
-    <#
-    .SYNOPSIS
-        Download and install missing dependencies
-    #>
-    
-    Write-Log "INFO" "Checking dependencies..."
-    
-    $ytdlpPath = Find-Binary "yt-dlp"
-    $ffmpegPath = Find-Binary "ffmpeg"
-    
-    if (-not $ytdlpPath) {
-        Write-Log "INFO" "Downloading yt-dlp..."
-        Install-Binary "yt-dlp"
-    }
-    
-    if (-not $ffmpegPath) {
-        Write-Log "INFO" "Downloading FFmpeg..."
-        Install-Binary "ffmpeg"
-    }
-    
-    Write-Log "INFO" "All dependencies ready"
-}
+Download URLs in `config.json` use platform-specific keys:
 
-function Install-Binary {
-    <#
-    .SYNOPSIS
-        Download and install a binary
-    #>
-    param(
-        [Parameter(Mandatory=$true)]
-        [ValidateSet('yt-dlp', 'ffmpeg')]
-        [string]$Name
-    )
-    
-    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-    $binDir = Join-Path $script:ScriptRoot "bin/$arch"
-    $url = $script:Config.binaries.$Name.$arch
-    
-    try {
-        if ($Name -eq 'yt-dlp') {
-            # Direct download
-            $outputPath = Join-Path $binDir "yt-dlp.exe"
-            Invoke-WebRequest -Uri $url -OutFile $outputPath -UseBasicParsing
-            Write-Log "INFO" "yt-dlp installed successfully"
-        }
-        elseif ($Name -eq 'ffmpeg') {
-            # Download and extract zip
-            $zipPath = Join-Path $script:ScriptRoot "cache/ffmpeg.zip"
-            Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
-            
-            # Extract (FFmpeg is in nested folder)
-            Expand-Archive -Path $zipPath -DestinationPath (Join-Path $script:ScriptRoot "cache") -Force
-            
-            # Find and copy binaries
-            $extractedDir = Get-ChildItem (Join-Path $script:ScriptRoot "cache") -Directory | 
-                           Where-Object { $_.Name -like "ffmpeg-*" } | 
-                           Select-Object -First 1
-            
-            Copy-Item (Join-Path $extractedDir.FullName "bin/ffmpeg.exe") $binDir -Force
-            Copy-Item (Join-Path $extractedDir.FullName "bin/ffprobe.exe") $binDir -Force
-            
-            # Cleanup
-            Remove-Item $zipPath -Force
-            Remove-Item $extractedDir.FullName -Recurse -Force
-            
-            Write-Log "INFO" "FFmpeg installed successfully"
-        }
-    }
-    catch {
-        Write-Log "ERROR" "Failed to install $Name: $_"
-        throw
-    }
+```json
+"binaries": {
+  "yt-dlp": {
+    "x64":         "...yt-dlp.exe",
+    "x86":         "...yt-dlp_x86.exe",
+    "linux-x64":   "...yt-dlp_linux",
+    "linux-arm64": "...yt-dlp_linux_aarch64"
+  },
+  "ffmpeg": {
+    "x64":         "...win64-gpl.zip",
+    "x86":         "...win32-gpl.zip",
+    "linux-x64":   "...linux64-gpl.tar.xz",
+    "linux-arm64": "...linuxarm64-gpl.tar.xz"
+  }
 }
 ```
+
+`Install-Binary` branches on `$IsWindows`:
+- **Windows**: `Expand-Archive` (zip) → copy `.exe` files
+- **Linux**: `tar -xJf` (tar.xz) → copy binaries → `chmod +x`
 
 ### 6. Interactive Menu
 
@@ -612,32 +534,46 @@ $testUrl = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # "Me at the zoo" (18s
 
 ## Common Issues & Solutions
 
-### Issue: Execution Policy Restricted
+### Issue: Execution Policy Restricted (Windows)
 
 ```powershell
-# Solution: Set execution policy
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+### Issue: `pwsh` not found (Linux)
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install -y powershell
+
+# Fedora/RHEL
+sudo dnf install powershell
+
+# Or via snap
+sudo snap install powershell --classic
 ```
 
 ### Issue: Binary Download Fails
 
-```powershell
-# Solution: Check network and retry
-# Or manually download and place in bin/x64/
-```
+- Check network connectivity
+- Or manually place binaries in `bin/x64/` (no `.exe` on Linux) and re-run
 
 ### Issue: GPU Not Detected
 
-```powershell
-# Solution: Update GPU drivers or use software encoding
-# Encoder will automatically fallback to libx264
-```
+- Windows: update GPU drivers; encoder falls back to `libx264` automatically
+- Linux (NVIDIA): `nvidia-smi` must be in PATH — install via your NVIDIA driver package
+- Linux (AMD/Intel): `sudo apt install pciutils` so `lspci` is available
 
 ### Issue: FFmpeg Extraction Fails
 
-```powershell
-# Solution: Manually extract and copy to bin/x64/
-# Or use 7-Zip if Expand-Archive fails
+- Windows: manually extract the zip and copy `ffmpeg.exe` + `ffprobe.exe` to `bin/x64/`
+- Linux: ensure `tar` is installed (`sudo apt install tar`); or `sudo apt install ffmpeg` and re-run
+
+### Issue: Browser cookie auth says "no browser found" (Linux)
+
+Install at least one supported browser:
+```bash
+sudo apt install firefox   # or chromium-browser, google-chrome, etc.
 ```
 
 ---
