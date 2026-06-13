@@ -64,45 +64,8 @@ On first run, Mr. Roboto will:
 
 Double-click **`roboto.bat`** and follow the prompts.
 
-You'll see:
+You'll see: <img width="692" height="853" alt="image" src="https://github.com/user-attachments/assets/ba8ea997-09d9-4eeb-8a14-13edf3933db5" />
 
-```
-╔═══════════════════════════════════════════════════════╗
-║          M R .  R O B O T O  v2.0                     ║
-║      Portable Media Downloader                      ║
-╚═══════════════════════════════════════════════════════╝
-
-  System Information
-  ─────────────────────────────────────────────────────
-  GPU      : NVIDIA GeForce RTX 3050
-  Encoder  : h264_nvenc
-  Arch     : x64
-  yt-dlp   : 2026.01.28
-  FFmpeg   : 7.0.2
-  Mode     : Interactive
-
-  ──────────────────────────────────────────────────────
-  Ready to download.
-
-  ┌─────────────────────────────────────────────────────────┐
-  │  Mr. Roboto — Acquisition Mode                          │
-  ├─────────────────────────────────────────────────────────┤
-  │  VIDEO                                                  │
-  │  [1] Ultra   4K MKV     (maximum quality)               │
-  │  [2] High    1080p MP4  (recommended)                   │
-  │  [3] Mobile  720p MP4   (compact, portable)             │
-  ├─────────────────────────────────────────────────────────┤
-  │  AUDIO ONLY                                             │
-  │  [4] FLAC    Lossless archive  (archival grade)         │
-  │  [5] Opus    Hi-Fi native      (bit-perfect, smallest)  │
-  │  [6] MP3     320 kbps          (universal compat)       │
-  ├─────────────────────────────────────────────────────────┤
-  │  [7] View Download History                              │
-  │  [Q] Quit                                               │
-  └─────────────────────────────────────────────────────────┘
-
-  Choice:
-```
 
 ### Direct Mode
 
