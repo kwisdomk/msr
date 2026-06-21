@@ -1,11 +1,30 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Mr. Roboto v2.0 — Native Linux/macOS launcher
+# Mr. Roboto v2.1 — Native Linux/macOS launcher
 # No PowerShell required. Requires: bash, curl or wget, tar.
+#
+# CHANGELOG (v2.1.0) — fixes for PR review blockers:
+#   1. Headless mode no longer prompts for save path, playlist choice, or
+#      cookie retry — it now runs fully unattended.
+#   2. Cookie escalation only fires on real auth-style failures (pattern
+#      matched against yt-dlp's actual output), not on invalid/unsupported
+#      URLs, truncated IDs, or generic network errors.
+#   3. Ctrl+C is trapped globally. State is preserved (not cleared) and the
+#      script exits cleanly instead of falling into the cookie-retry prompt.
+#   4. save_history() now passes data through argv into a quoted heredoc
+#      instead of interpolating shell variables into an unquoted heredoc —
+#      closes a Python-injection hole: a title/URL containing `"""` broke
+#      out of the generated Python string literal and ran as live code
+#      (verified exploitable: a crafted URL triggered arbitrary command
+#      execution via __import__("os").system(...)).
+#   5. Fixed a duplicate get_cookie_browser() call that ran the function
+#      once uncaptured (leaking the raw browser name to the terminal) and
+#      once captured. Also added Snap/Flatpak-aware Brave profile
+#      resolution so --cookies-from-browser works on Snap installs.
 # =============================================================================
 set -euo pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Architecture ──────────────────────────────────────────────────────────────
@@ -40,6 +59,19 @@ DOWNLOAD_DIR=""
 GPU_NAME="Unknown"
 ENCODER="libx264"
 USE_COOKIES="false"
+HEADLESS_MODE=false
+
+# ── Interrupt handling (fixes blocker #3) ─────────────────────────────────────
+# Trapped globally so Ctrl+C is caught no matter where the script is —
+# mid-download, mid-prompt, mid-dependency-install. We deliberately do NOT
+# call clear_state here: the whole point is to preserve resume state.
+on_sigint() {
+    printf '\n\n  %s\n' "${Y}[!] Interrupted by user (Ctrl+C).${N}"
+    printf '  %s\n\n' "${D}Any in-progress download state has been preserved — run again to resume.${N}"
+    log WARN "Script interrupted via SIGINT; state preserved for resume."
+    exit 130
+}
+trap on_sigint INT
 
 # =============================================================================
 # Logging
@@ -68,6 +100,8 @@ init_env() {
               "$SCRIPT_DIR/downloads" "$SCRIPT_DIR/metadata"; do
         mkdir -p "$d"
     done
+    # Sweep stray yt-dlp output captures from interrupted runs (see start_acquisition)
+    find "$CACHE_DIR" -maxdepth 1 -name 'ytdlp_out.*' -mmin +60 -delete 2>/dev/null || true
     init_logging
     log INFO "Environment ready. Arch: $ARCH"
 }
@@ -229,10 +263,21 @@ EOF
 
 clear_state() { rm -f "$STATE_FILE"; }
 
+# Reads a single field out of a small JSON file. Values are passed to
+# Python via argv (sys.argv), never interpolated into the heredoc body —
+# same fix as save_history() below, applied here for consistency.
 _json_field() {
     local file="$1" field="$2"
     if command -v python3 &>/dev/null; then
-        python3 -c "import json; d=json.load(open('$file')); print(d.get('$field',''))" 2>/dev/null || true
+        python3 - "$file" "$field" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(d.get(sys.argv[2], ''))
+except Exception:
+    pass
+PYEOF
     else
         grep -o "\"$field\":\"[^\"]*\"" "$file" 2>/dev/null | cut -d'"' -f4
     fi
@@ -284,15 +329,28 @@ except: print('no')
 # Download History
 # =============================================================================
 
+# FIX (blocker #4): previously this used an UNQUOTED heredoc
+# (`<<PYEOF` instead of `<<'PYEOF'`), so bash substituted $title/$url
+# directly into the heredoc body before Python ever saw it, landing raw,
+# un-escaped bytes inside Python triple-quoted string literals
+# (`"""$title"""`, `"""$url"""`). Any title or URL containing `"""`
+# breaks out of that string and the rest is parsed as live Python — e.g. a
+# url of  a"""+__import__("os").system("...")+"""b  runs arbitrary shell
+# commands the moment save_history() is called. Verified exploitable in
+# testing. Fix: quote the heredoc delimiter (no shell expansion inside it
+# at all) and pass all values through sys.argv instead, so they're always
+# treated as opaque strings, never as source text.
 save_history() {
     local title="$1" url="$2" profile="$3" dir="$4"
     command -v python3 &>/dev/null || return 0
-    python3 - "$HISTORY_FILE" <<PYEOF
+    local now; now=$(date '+%Y-%m-%d %H:%M:%S')
+    python3 - "$HISTORY_FILE" "$title" "$url" "$profile" "$dir" "$now" <<'PYEOF'
 import json, sys, os
-f = sys.argv[1]
-rec = {"title": """$title""", "url": """$url""",
-       "profile": """$profile""", "path": """$dir""",
-       "time": "$(date '+%Y-%m-%d %H:%M:%S')", "status": "completed"}
+
+f, title, url, profile, dir_, ts = sys.argv[1:7]
+rec = {"title": title, "url": url,
+       "profile": profile, "path": dir_,
+       "time": ts, "status": "completed"}
 h = []
 if os.path.exists(f):
     try:
@@ -332,8 +390,11 @@ PYEOF
 # Download Location
 # =============================================================================
 
+# FIX (blocker #1): accepts an optional pre-supplied directory and, in
+# HEADLESS_MODE, never calls `read`. Headless runs either use the
+# explicitly passed dir or fall back silently to the XDG default.
 select_download_location() {
-    local profile="$1" label default_dir xdg_result
+    local profile="$1" custom_dir="${2:-}" label default_dir xdg_result
 
     if [[ "$profile" == audio-* ]]; then
         label="Music"
@@ -347,11 +408,16 @@ select_download_location() {
         default_dir="${xdg_result:-$HOME/Videos}"
     fi
 
-    printf '\n'
-    printf '  %s\n' "${D}Default save location (${label}): ${default_dir}${N}"
-    printf '  %s\n' "${D}Press Enter to accept, or type a custom path:${N}"
-    read -r -p "  Path: " custom
-    [[ -n "$custom" ]] && default_dir="$custom"
+    if $HEADLESS_MODE; then
+        [[ -n "$custom_dir" ]] && default_dir="$custom_dir"
+        log INFO "Headless mode: using download location: $default_dir"
+    else
+        printf '\n'
+        printf '  %s\n' "${D}Default save location (${label}): ${default_dir}${N}"
+        printf '  %s\n' "${D}Press Enter to accept, or type a custom path:${N}"
+        read -r -p "  Path: " custom
+        [[ -n "$custom" ]] && default_dir="$custom"
+    fi
 
     if ! mkdir -p "$default_dir" 2>/dev/null; then
         log WARN "Could not create '$default_dir'; using $SCRIPT_DIR/downloads"
@@ -376,14 +442,108 @@ validate_url() {
 }
 
 # =============================================================================
-# Browser Detection
+# Browser Detection / Cookie Profile Resolution
 # =============================================================================
 
+# Brave installed via Snap (or Flatpak) does NOT live at the conventional
+# ~/.config/BraveSoftware/Brave-Browser path that yt-dlp's browser-cookie
+# code assumes by default — that path exists but is an empty stub
+# (NativeMessagingHosts/ only). This walks the known native/Snap/Flatpak
+# roots, finds the most recently modified Cookies file (Chromium >=96
+# stores it at <profile>/Network/Cookies, older versions at
+# <profile>/Cookies — we check for both and normalize to the profile dir),
+# and returns that exact profile directory so yt-dlp doesn't have to guess.
+#
+# Override: set MR_ROBOTO_BRAVE_PROFILE to force an exact path if the
+# heuristic ever picks the wrong profile (e.g. multiple Google accounts
+# logged into different Brave profiles).
+resolve_brave_profile() {
+    if [[ -n "${MR_ROBOTO_BRAVE_PROFILE:-}" ]]; then
+        printf '%s' "$MR_ROBOTO_BRAVE_PROFILE"
+        return 0
+    fi
+
+    local roots=(
+        "$HOME/.config/BraveSoftware/Brave-Browser"
+        "$HOME/snap/brave/current/.config/BraveSoftware/Brave-Browser"
+        "$HOME/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"
+    )
+    local root cookie_file ts best="" best_ts=0
+
+    for root in "${roots[@]}"; do
+        [[ -d "$root" ]] || continue
+        while IFS= read -r cookie_file; do
+            ts=$(stat -c '%Y' "$cookie_file" 2>/dev/null || printf '0')
+            if (( ts > best_ts )); then
+                best_ts=$ts
+                best=$(dirname "$cookie_file")
+                [[ "$(basename "$best")" == "Network" ]] && best=$(dirname "$best")
+            fi
+        done < <(find "$root" -maxdepth 4 -iname 'Cookies' -type f 2>/dev/null)
+    done
+
+    [[ -n "$best" ]] && { printf '%s' "$best"; return 0; }
+    return 1
+}
+
+# FIX (blocker #5): previously called twice —
+#   get_cookie_browser && cookie_browser=$(get_cookie_browser) || true
+# The first call ran for its exit status only, but the function's
+# `printf '%s' "$b"` inside still wrote straight to the terminal
+# (uncaptured), which is exactly the stray "firefox" line seen in review.
+# Calling it once via command substitution fixes both the leak and halves
+# the work. Also now resolves a full --cookies-from-browser spec
+# (BROWSER[:PROFILE_PATH]) rather than a bare browser name.
 get_cookie_browser() {
+    local b
     for b in firefox chrome chromium brave vivaldi opera; do
-        command -v "$b" &>/dev/null && printf '%s' "$b" && return 0
+        command -v "$b" &>/dev/null || continue
+        if [[ "$b" == "brave" ]]; then
+            local profile
+            if profile=$(resolve_brave_profile); then
+                printf '%s' "brave:${profile}"
+            else
+                printf '%s' "brave"
+            fi
+        else
+            printf '%s' "$b"
+        fi
+        return 0
     done
     return 1
+}
+
+# =============================================================================
+# Failure Classification (fixes blocker #2)
+# =============================================================================
+# yt-dlp doesn't expose a rich set of distinct exit codes per failure type,
+# so we pattern-match its actual stdout/stderr. These lists are heuristics —
+# expect to extend them as you hit new failure strings in the wild.
+
+# Auth-style failures where retrying with browser cookies could plausibly help.
+is_auth_failure() {
+    grep -qiE \
+        'sign in to confirm|requires authentication|private video|age[- ]restricted|http error 403|login required' \
+        "$1"
+}
+
+# Failures where the URL/content itself is the problem — retrying or
+# escalating to cookie auth will not help. Includes the truncated-ID case
+# from the review ("Incomplete YouTube ID ___. URL ___ looks truncated.").
+is_non_retryable() {
+    grep -qiE \
+        'unsupported url|incomplete .*id|looks truncated|no video formats found|video unavailable|this video has been removed|does not exist' \
+        "$1"
+}
+
+# Detects a user-initiated interruption (Ctrl+C) rather than a real failure.
+# Exit code 130 = 128+SIGINT, the standard shell convention. We also check
+# the captured text in case yt-dlp caught the signal itself and exited 1
+# with its own "Interrupted by user" message instead of dying to the signal.
+is_user_interrupt() {
+    local exit_code="$1" out_file="$2"
+    [[ "$exit_code" -eq 130 ]] && return 0
+    grep -qi 'interrupted by user' "$out_file"
 }
 
 # =============================================================================
@@ -413,17 +573,29 @@ start_acquisition() {
     esac
 
     # ── Playlist check ───────────────────────────────────────────────────────
+    # FIX (part of blocker #1): this `read` would also hang a headless run.
+    # In headless mode we default to single-video unless explicitly opted
+    # into full-playlist mode via MR_ROBOTO_PLAYLIST=yes.
     local playlist_flag="--no-playlist"
     if [[ "$url" == *list=* ]]; then
-        printf '\n  %s\n' "${Y}WARNING: Playlist detected in URL.${N}"
-        printf '  [1] Single video (recommended)\n'
-        printf '  [2] Full playlist\n\n'
-        read -r -p "  Choice [1]: " pl_choice
-        if [[ "$pl_choice" == "2" ]]; then
-            playlist_flag="--yes-playlist"
-            log INFO "Playlist mode enabled."
+        if $HEADLESS_MODE; then
+            if [[ "${MR_ROBOTO_PLAYLIST:-}" == "yes" ]]; then
+                playlist_flag="--yes-playlist"
+                log INFO "Headless mode: full playlist enabled via MR_ROBOTO_PLAYLIST=yes."
+            else
+                log INFO "Headless mode: playlist URL detected, defaulting to single video (set MR_ROBOTO_PLAYLIST=yes to change)."
+            fi
         else
-            log INFO "Single video enforced (playlist URL)."
+            printf '\n  %s\n' "${Y}WARNING: Playlist detected in URL.${N}"
+            printf '  [1] Single video (recommended)\n'
+            printf '  [2] Full playlist\n\n'
+            read -r -p "  Choice [1]: " pl_choice
+            if [[ "$pl_choice" == "2" ]]; then
+                playlist_flag="--yes-playlist"
+                log INFO "Playlist mode enabled."
+            else
+                log INFO "Single video enforced (playlist URL)."
+            fi
         fi
     fi
 
@@ -456,11 +628,13 @@ start_acquisition() {
         fi
     fi
 
-    # ── Retry loop ───────────────────────────────────────────────────────────
+    # ── Resolve cookie browser once (fixes blocker #5 leak) ─────────────────
     local cookie_browser=""
-    get_cookie_browser && cookie_browser=$(get_cookie_browser) || true
+    cookie_browser=$(get_cookie_browser) || true
 
+    # ── Retry loop ───────────────────────────────────────────────────────────
     local attempt=1 max=3 success=false use_cookies=false
+    local out_file; out_file=$(mktemp "${CACHE_DIR}/ytdlp_out.XXXXXX")
 
     while [[ $attempt -le $max ]] && ! $success; do
         printf '\n  %s\n' "${G}- Downloading (Attempt ${attempt}/${max})...${N}"
@@ -475,8 +649,17 @@ start_acquisition() {
             run_args+=(--no-cookies)
         fi
 
-        local exit_code=0
-        "$ytdlp" "${run_args[@]}" || exit_code=$?
+        : > "$out_file"
+        # Capture combined stdout+stderr to a file (for pattern matching)
+        # while still streaming live to the terminal via tee. We toggle
+        # errexit off around the pipeline so a non-zero yt-dlp exit doesn't
+        # kill the script before we get a chance to classify it — and we
+        # read PIPESTATUS immediately, before any other command can
+        # clobber it.
+        set +e
+        "$ytdlp" "${run_args[@]}" 2>&1 | tee "$out_file"
+        local exit_code=${PIPESTATUS[0]}
+        set -e
 
         if [[ $exit_code -eq 0 ]]; then
             log INFO "Download completed successfully."
@@ -484,24 +667,51 @@ start_acquisition() {
             save_history "$(basename "$dir")" "$url" "$profile" "$dir"
             clear_state
             success=true
+        elif is_user_interrupt "$exit_code" "$out_file"; then
+            printf '\n  %s\n' "${Y}Download interrupted by user.${N}"
+            printf '  %s\n' "${D}State preserved — resume available next run.${N}"
+            log WARN "Download interrupted by user; state preserved."
+            rm -f "$out_file"
+            return 130
+        elif is_non_retryable "$out_file"; then
+            printf '\n  %s\n' "${R}Download failed — URL is invalid, unsupported, or unavailable.${N}"
+            printf '  %s\n'   "${D}Retrying or using browser cookies will not help here.${N}"
+            log ERROR "Non-retryable failure for $url"
+            clear_state
+            rm -f "$out_file"
+            return 1
         else
             log WARN "yt-dlp exited with code $exit_code."
 
-            if ! $use_cookies && [[ -n "$cookie_browser" ]]; then
-                printf '\n  %s\n' "${Y}Download failed. YouTube may require sign-in.${N}"
-                read -r -p "  Retry with $cookie_browser cookies? [Y/N]: " try_auth
-                if [[ "$try_auth" =~ ^[Yy] ]]; then
-                    use_cookies=true
-                    log INFO "Cookie auth enabled: $cookie_browser"
+            if is_auth_failure "$out_file" && ! $use_cookies && [[ -n "$cookie_browser" ]]; then
+                printf '\n  %s\n' "${Y}Download failed. YouTube requires sign-in.${N}"
+                if $HEADLESS_MODE; then
+                    if [[ "${MR_ROBOTO_COOKIES:-}" == "yes" ]]; then
+                        use_cookies=true
+                        log INFO "Headless cookie auth enabled (MR_ROBOTO_COOKIES=yes): $cookie_browser"
+                    else
+                        printf '  %s\n' "${R}Headless mode: skipping cookie retry. Set MR_ROBOTO_COOKIES=yes to allow.${N}"
+                        log ERROR "Auth failure in headless mode; cookie retry not enabled."
+                        rm -f "$out_file"
+                        return 1
+                    fi
                 else
-                    printf '  %s\n' "${R}Download failed. Check logs/ for details.${N}"
-                    break
+                    read -r -p "  Retry with $cookie_browser cookies? [Y/N]: " try_auth
+                    if [[ "$try_auth" =~ ^[Yy] ]]; then
+                        use_cookies=true
+                        log INFO "Cookie auth enabled: $cookie_browser"
+                    else
+                        printf '  %s\n' "${R}Download failed. Check logs/ for details.${N}"
+                        rm -f "$out_file"
+                        return 1
+                    fi
                 fi
-            elif ! $use_cookies && [[ -z "$cookie_browser" ]]; then
-                printf '\n  %s\n' "${R}Download failed. No supported browser found for cookie auth.${N}"
+            elif is_auth_failure "$out_file" && [[ -z "$cookie_browser" ]]; then
+                printf '\n  %s\n' "${R}Download failed (sign-in required). No supported browser found for cookie auth.${N}"
                 printf '  %s\n'   "${Y}Install Firefox or Chrome to enable authentication fallback.${N}"
-                log ERROR "Download failed; no browser available for cookie escalation."
-                break
+                log ERROR "Auth failure; no browser available for cookie escalation."
+                rm -f "$out_file"
+                return 1
             elif [[ $attempt -lt $max ]]; then
                 printf '\n  %s\n' "${Y}Retrying in 5 seconds...${N}"
                 sleep 5
@@ -509,14 +719,20 @@ start_acquisition() {
                 printf '\n  %s\n' "${R}Download failed after $max attempts.${N}"
                 printf '  %s\n'   "${Y}Check logs/ for details.${N}"
                 log ERROR "Download failed after $max attempts."
-                break
+                rm -f "$out_file"
+                return 1
             fi
         fi
 
         ((attempt++)) || true
     done
 
-    $success || log ERROR "Acquisition ended without success for: $url"
+    rm -f "$out_file"
+    if $success; then
+        return 0
+    fi
+    log ERROR "Acquisition ended without success for: $url"
+    return 1
 }
 
 # =============================================================================
@@ -594,17 +810,20 @@ main() {
     show_banner
 
     if [[ $# -gt 0 ]]; then
-        # Direct / headless mode: ./roboto.sh <url> [profile]
-        local url="$1" profile="${2:-high}"
+        # Direct / headless mode: ./roboto.sh <url> [profile] [output_dir]
+        HEADLESS_MODE=true
+        local url="$1" profile="${2:-high}" custom_dir="${3:-}"
         if ! validate_url "$url"; then
             printf '%s\n' "${R}[ERROR] Invalid URL: $url${N}" >&2; exit 1
         fi
-        select_download_location "$profile"
-        start_acquisition "$url" "$profile" "$DOWNLOAD_DIR"
-    else
-        start_interactive
+        select_download_location "$profile" "$custom_dir"
+        local rc=0
+        start_acquisition "$url" "$profile" "$DOWNLOAD_DIR" || rc=$?
+        log INFO "Session ended."
+        exit $rc
     fi
 
+    start_interactive
     log INFO "Session ended."
 }
 
