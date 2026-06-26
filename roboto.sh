@@ -416,7 +416,20 @@ select_download_location() {
         printf '  %s\n' "${D}Default save location (${label}): ${default_dir}${N}"
         printf '  %s\n' "${D}Press Enter to accept, or type a custom path:${N}"
         read -r -p "  Path: " custom
-        [[ -n "$custom" ]] && default_dir="$custom"
+        if [[ -n "$custom" ]]; then
+            # Strip any wrapping quote characters the user may have pasted in
+            # (e.g. "/home/ian" → /home/ian, '/home/ian' → /home/ian).
+            custom="${custom#\"}" ; custom="${custom%\"}"
+            custom="${custom#\'}" ; custom="${custom%\'}"
+            # Expand a leading ~ to $HOME so ~/Videos works as expected.
+            # We do NOT use `eval` — just a simple prefix substitution.
+            [[ "$custom" == "~" ]]   && custom="$HOME"
+            # SC2088 is a false positive: we're matching the literal string "~/"
+            # as a prefix pattern, not relying on tilde expansion in quotes.
+            # shellcheck disable=SC2088
+            [[ "$custom" == "~/"* ]] && custom="$HOME/${custom:2}"
+            default_dir="$custom"
+        fi
     fi
 
     if ! mkdir -p "$default_dir" 2>/dev/null; then
@@ -662,6 +675,19 @@ start_acquisition() {
         set -e
 
         if [[ $exit_code -eq 0 ]]; then
+            # Guard against the "empty playlist" false positive: yt-dlp exits 0
+            # and prints "Downloading 0 items" when a channel redirect produces
+            # no usable content (e.g. backslash-escaped URLs, region-blocked
+            # channel pages). Treat that as a real failure so we don't print
+            # "Download complete!" and write a junk history record.
+            if grep -q 'Downloading 0 items' "$out_file"; then
+                log WARN "yt-dlp exited 0 but downloaded 0 items — likely a bad URL or region block."
+                printf '\n  %s\n' "${R}Download failed — no media found at that URL.${N}"
+                printf '  %s\n'   "${D}Check the URL is correct and unescaped (no backslashes before ? or &).${N}"
+                clear_state
+                rm -f "$out_file"
+                return 1
+            fi
             log INFO "Download completed successfully."
             printf '\n  %s\n' "${G}Download complete!${N}"
             save_history "$(basename "$dir")" "$url" "$profile" "$dir"
