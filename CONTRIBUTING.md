@@ -66,3 +66,17 @@ Maintainers may request changes if a PR:
 - Changes Windows behavior without clear explanation
 - Adds large generated documents
 - Does not include enough test notes
+
+## Linux beta reports
+
+Linux support is currently beta.
+
+When opening Linux issues, please include:
+
+- Distribution and version
+- Architecture
+- Shell used
+- Command run
+- Full terminal output
+- Latest log file
+- Whether the issue happened in interactive mode or direct mode
