@@ -2,9 +2,14 @@
 
 Mr. Roboto is a portable media downloader powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org/).
 
-**Supported Platforms:** 
-- Windows 10/11 (Stable)
-- Linux (Beta)
+## Platform status
+
+- Windows: stable
+- Linux: beta
+
+Linux support is new. Please report issues with the command used, full terminal output, and latest log file where possible.
+
+For troubleshooting and platform-specific help, see [HELP.md](HELP.md).
 
 ## Features
 - Downloads yt-dlp and FFmpeg automatically on the first run if they are missing.
@@ -37,6 +42,7 @@ The simplest way to use Mr. Roboto on Windows is via the batch launcher:
 Run the native bash script from your terminal:
 
 ```bash
+chmod +x roboto.sh
 ./roboto.sh
 ```
 
