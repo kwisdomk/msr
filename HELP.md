@@ -110,6 +110,20 @@ Report:
 - latest log file
 - contents of `state/session.json` if it exists
 
+### YouTube JavaScript runtime warning
+
+yt-dlp may show a warning that no supported JavaScript runtime was found.
+
+Mr. Roboto can still work without it, but some YouTube formats may be missing.
+
+On Debian/Kali/Ubuntu-based systems, install Deno if needed:
+
+```bash
+curl -fsSL https://deno.land/install.sh | sh
+```
+
+After installation, restart the terminal and rerun Mr. Roboto.
+
 ## Reporting Linux beta issues
 
 When reporting Linux beta issues, include:
