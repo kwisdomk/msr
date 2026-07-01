@@ -2,20 +2,26 @@
 
 Mr. Roboto is a portable media downloader powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org/).
 
-**Supported Platforms:** 
-- Windows 10/11 (Stable)
-- Linux (Planned / Upcoming Beta)
+## Platform status
+
+- Windows: stable
+- Linux: beta
+
+Linux support is new. Please report issues with the command used, full terminal output, and latest log file where possible.
+
+For troubleshooting and platform-specific help, see [HELP.md](HELP.md).
 
 ## Features
 - Downloads yt-dlp and FFmpeg automatically on the first run if they are missing.
 - Provides an interactive terminal menu for selecting quality profiles.
 - Supports resuming interrupted downloads.
-- Falls back to browser cookies (Microsoft Edge) if a download requires authentication.
+- Falls back to browser cookies if a download requires authentication (Edge on Windows; Firefox/Chrome on Linux).
 - Uses stream-copy muxing to preserve original codec quality (GPU detection does not perform re-encoding).
 
 ## Directory Structure
 - `roboto.bat` - Windows launcher.
-- `roboto.ps1` - Core PowerShell script.
+- `roboto.sh` - Linux native bash launcher.
+- `roboto.ps1` - Core PowerShell script (Windows).
 - `bin/` - Auto-downloaded yt-dlp and FFmpeg binaries.
 - `downloads/` - Default save location for downloaded media.
 - `logs/` - Session log files.
@@ -31,7 +37,18 @@ The simplest way to use Mr. Roboto on Windows is via the batch launcher:
 
 *(Note: Always use `roboto.bat` for interactive use, as it automatically handles the PowerShell execution policy for the session).*
 
-## PowerShell Usage (Direct Mode)
+## Quick Start (Linux)
+
+Run the native bash script from your terminal:
+
+```bash
+chmod +x roboto.sh
+./roboto.sh
+```
+
+*Prerequisites: `bash`, `curl` or `wget`, and `tar` (pre-installed on most distributions).*
+
+## PowerShell Usage (Direct Mode - Windows)
 
 You can run Mr. Roboto directly from PowerShell for single-command execution:
 

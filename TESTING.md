@@ -26,6 +26,21 @@ Before merging pull requests, complete the following manual tests to ensure stab
 - [ ] Attempt to download an age-restricted or members-only video.
 - [ ] Verify the script detects the authentication failure and attempts to escalate using Microsoft Edge cookies.
 
+## Linux beta checklist
+
+Run these on a Linux VM before beta release:
+
+- [ ] Fresh clone
+- [ ] `chmod +x roboto.sh`
+- [ ] `./roboto.sh` launches
+- [ ] yt-dlp bootstraps successfully
+- [ ] FFmpeg bootstraps successfully
+- [ ] A short public media URL downloads successfully
+- [ ] Direct mode works, if supported: `./roboto.sh "<url>" high`
+- [ ] Ctrl+C interruption saves state
+- [ ] Resume restores the correct output path
+- [ ] Logs are written under `logs/`
+
 ## PR Merge Requirements
 - [ ] **Windows Test:** Required for all PRs.
 - [ ] **Linux Test:** Required only for Linux-specific PRs (when Linux support is merged).
